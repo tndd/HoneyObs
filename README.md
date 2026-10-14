@@ -2,6 +2,8 @@
 
 Apple Silicon Mac上で、小さなLinux VMをアプリに内蔵し、Cloudflareの一時URLから模擬HTTPサービスへ到達できるかを確かめる試作です。Docker、Python、Goのインストールは**完成したアプリを実行する側では不要**です。
 
+ソースの公開先：[tndd/HoneyObs](https://github.com/tndd/HoneyObs)。
+
 現段階はローカル署名した検証アプリです。一般配布用のDeveloper ID署名・公証は行っていません。macOS 15以降・Apple Siliconを対象とし、今回の実機はmacOS 15.8.1です。
 
 ## アプリの操作
