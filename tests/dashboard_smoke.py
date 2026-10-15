@@ -16,7 +16,7 @@ def main():
             return read(directory / 'ui-state.json')
         def state():
             value = read(directory / 'state.json')
-            if value.get('phase') == 'エラー':
+            if value.get('phase') in ('エラー', '停止失敗'):
                 raise AssertionError(value['detail'])
             return value
         def command(action):
@@ -50,7 +50,7 @@ def main():
             assert not ui()['overflow']
             capture('compact.png')
             command('stop')
-            wait(lambda: ui().get('phase') == '停止中' and ui().get('canStart'), 20)
+            wait(lambda: ui().get('phase') == '停止完了' and ui().get('canStart'), 20)
             assert ui()['rows'] >= 2 and ui()['request'] == 'POST /login'
             assert ui()['packets'] == 0 and ui()['url'] == '公開URLなし'
             guard = read(directory / 'watchdog.json')

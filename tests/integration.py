@@ -67,7 +67,7 @@ class Session:
 
     def state(self):
         value = read(self.directory / 'state.json')
-        if value.get('phase') == 'エラー':
+        if value.get('phase') in ('エラー', '停止失敗'):
             raise AssertionError(value.get('detail'))
         if self.process.poll() is not None:
             raise AssertionError('アプリが終了しました: ' + str(self.process.returncode))
@@ -138,7 +138,8 @@ def local_test():
         session.ready()
         result = isolation(session)
         session.command('stop')
-        wait(lambda: session.state().get('active') is False)
+        wait(lambda: session.state().get('shutdownComplete') is True)
+        assert session.state()['vmPresent'] is False
         return result
     finally:
         session.cleanup()
@@ -174,7 +175,7 @@ def public_test():
                                'xffSpoofIgnored': True, 'cfIPSpoofBlockedAtEdge': True, 'queryNotStored': True, 'bodyLimit413': True,
                                'localBypass403': True, 'loginAlways401': True}
         session.command('stop')
-        wait(lambda: session.state().get('active') is False)
+        wait(lambda: session.state().get('shutdownComplete') is True)
         result['normalStop'] = stopped(session, state)
         return result
     finally:
@@ -190,7 +191,7 @@ def lifecycle_test(name, crash):
             session.process.wait(timeout=5)
         else:
             session.command('simulate-sleep')
-            wait(lambda: session.state().get('active') is False)
+            wait(lambda: session.state().get('shutdownComplete') is True)
             assert session.state()['detail'] == 'スリープ通知'
         return stopped(session, state, crash=crash)
     finally:

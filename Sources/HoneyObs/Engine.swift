@@ -7,14 +7,14 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     let directory: URL
     let resources: URL
     var onChange: (() -> Void)?
-    private(set) var phase = "停止中"
+    private(set) var phase = "停止完了"
     private(set) var publicURL = ""
     private(set) var detail = ""
     private var machine: VZVirtualMachine?
     private var console: FileHandle?
     private var listener: NWListener?
     private var sessions: [UUID: Relay] = [:]
-    private var pending = 0
+    private var pending: [UUID: NWConnection] = [:]
     private var supervisor: Process?
     private var timer: Timer?
     private var wantsPublic = false
@@ -29,13 +29,36 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var publicCheckStarted = Date()
     private var snapshot: [String: Any] = [:]
     private var sleepObserver: NSObjectProtocol?
+    private var stopTimer: Timer?
+    private var stopStarted = 0.0
+    private var stopAttempt = UUID()
+    private var stopRequested = false
+    private var stopping = false
+    private var stopFailed = false
+    private var supervisorUnconfirmed = false
+    private var runError: String?
+    private var stopCallbacks: [(Bool) -> Void] = []
+    private var lastGuestReply = 0.0
+    private var publicSession: URLSession?
+    private let stopLimit: TimeInterval
+    private let healthLimit: TimeInterval
+    private let stopMachine: (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void
+    private let readGuest: (VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void
     private(set) var events: [ObservedEvent] = []
     private(set) var sessionID = UUID().uuidString
-    var canStart: Bool { !active && machine == nil && supervisor == nil }
+    var shutdownComplete: Bool {
+        !active && !stopping && !stopFailed && !supervisorUnconfirmed && machine == nil &&
+        supervisor == nil && listener == nil && sessions.isEmpty && pending.isEmpty
+    }
+    var canStart: Bool { shutdownComplete }
     var isActive: Bool { active }
 
-    init(directory: URL, resources: URL) throws {
+    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5,
+         stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
+         readGuest: @escaping (VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void = { vm, done in guestRequest(vm, completion: done) }) throws {
         self.directory = directory; self.resources = resources
+        self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
+        self.readGuest = readGuest
         super.init()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -53,7 +76,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func update() {
         save(["phase": phase, "detail": detail, "url": publicURL, "pid": getpid(),
               "supervisorPID": supervisor?.processIdentifier ?? 0, "originPort": localPort,
-              "active": active, "vmPresent": machine != nil, "networkDevices": 0, "sharedDirectories": 0,
+              "active": active, "vmPresent": machine != nil, "canStart": canStart,
+              "shutdownComplete": shutdownComplete, "stopping": stopping, "networkDevices": 0, "sharedDirectories": 0,
               "storageDevices": 0, "time": ISO8601DateFormatter().string(from: Date())], name: "state.json")
         onChange?()
     }
@@ -61,6 +85,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     func start(publish: Bool) {
         guard canStart else { return }
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
+        runError = nil; lastGuestReply = ProcessInfo.processInfo.systemUptime
         generation = UUID(); let current = generation
         sessionID = generation.uuidString; events = []
         originHost = UUID().uuidString.lowercased() + ".invalid"
@@ -85,7 +110,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             try config.validate()
             let vm = VZVirtualMachine(configuration: config); machine = vm; vm.delegate = self
             vm.start { [weak self] result in
-                guard let self, self.generation == current, self.active else { return }
+                guard let self, self.machine === vm else { return }
+                // 起動中のOFFでもVMの所有を保持し、起動完了後に停止する。
+                if !self.active { self.advanceStop(); return }
+                guard self.generation == current else { return }
                 switch result {
                 case .failure(let error): self.fail(error.localizedDescription)
                 case .success:
@@ -109,15 +137,19 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         }
         if !tunnelStarted && Date().timeIntervalSince(started) > 30 { fail("VM起動の期限を超えました"); return }
         if tunnelStarted, publicURL.isEmpty, wantsPublic, Date().timeIntervalSince(started) > 90 { fail("一時公開URLの取得に失敗しました"); return }
+        if tunnelStarted, ProcessInfo.processInfo.systemUptime - lastGuestReply > healthLimit {
+            fail("VMの応答期限を超えたため公開を停止します"); return
+        }
         readTunnelURL()
         guard !polling else { return }; polling = true
         let current = generation
-        guestRequest(machine) { [weak self] result in
+        readGuest(machine) { [weak self] result in
             guard let self, self.active, self.generation == current else { return }
             self.polling = false
             guard case .success(let data) = result,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   json["uid"] as? Int == 65534 else { return }
+            self.lastGuestReply = ProcessInfo.processInfo.systemUptime
             if (self.snapshot["total"] as? Int) != (json["total"] as? Int) || (self.snapshot["boot"] as? String) != (json["boot"] as? String) {
                 self.save(json, name: "events.json")
             }
@@ -147,7 +179,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             let server = try NWListener(using: parameters)
             listener = server; let current = generation
             server.stateUpdateHandler = { [weak self, weak server] state in
-                guard let self, self.active, self.generation == current else { return }
+                guard let self else { return }
+                if case .cancelled = state, self.listener === server {
+                    self.listener = nil; self.advanceStop(); return
+                }
+                guard self.active, self.generation == current else { return }
                 switch state {
                 case .ready:
                     if let port = server?.port { self.localPort = port.rawValue; self.startTunnel() }
@@ -157,17 +193,23 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             server.newConnectionHandler = { [weak self] client in
                 guard let self, self.active, self.generation == current,
-                      self.pending + self.sessions.count < 8,
+                      self.pending.count + self.sessions.count < 8,
                       let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { client.cancel(); return }
-                self.pending += 1
+                let pendingID = UUID(); self.pending[pendingID] = client
                 device.connect(toPort: 7000) { result in
-                    self.pending -= 1
-                    guard self.active, self.generation == current else { client.cancel(); return }
+                    self.pending.removeValue(forKey: pendingID)
+                    guard self.active, self.generation == current else {
+                        client.cancel()
+                        if case .success(let guest) = result { guest.close() }
+                        self.advanceStop(); return
+                    }
                     switch result {
                     case .failure: client.cancel()
                     case .success(let guest):
                         let id = UUID()
-                        let relay = Relay(client: client, guest: guest) { [weak self] in self?.sessions.removeValue(forKey: id) }
+                        let relay = Relay(client: client, guest: guest) { [weak self] in
+                            self?.sessions.removeValue(forKey: id); self?.advanceStop()
+                        }
                         self.sessions[id] = relay; relay.start()
                     }
                 }
@@ -190,11 +232,16 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                              "--http-host-header", originHost, "--protocol", "http2", "--metrics", "127.0.0.1:0"]
         let handle = try? FileHandle(forWritingTo: log)
         process.standardOutput = handle; process.standardError = handle
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] exited in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.supervisor === exited else { return }
                 self.supervisor = nil
-                if self.active { self.fail("公開用プロセスが終了しました") } else { self.update() }
+                // 監視役の正常終了は子のwaitUntilExit後だけ。異常終了では回収を推測しない。
+                if exited.terminationReason != .exit || exited.terminationStatus != 0 {
+                    self.supervisorUnconfirmed = true
+                }
+                if self.active { self.fail("公開用プロセスが終了しました") }
+                else { self.advanceStop(); self.update() }
             }
         }
         do { try process.run(); supervisor = process; phase = "公開接続中"; update() }
@@ -215,9 +262,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         let current = generation
         let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 8
         let session = URLSession(configuration: config)
+        publicSession = session
         session.dataTask(with: URL(string: publicURL + "/honeyobs-test-ready")!) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self, self.active, self.generation == current else { return }
+                self.publicSession = nil
                 if let response = response as? HTTPURLResponse, response.statusCode == 404,
                    data == Data("Not found\n".utf8) {
                     self.phase = "公開中"; self.detail = "公開URL経由でVMの応答を確認"
@@ -237,22 +286,75 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         }.resume()
     }
 
-    func stop(reason: String) {
-        guard active || machine != nil else { return }
-        active = false; generation = UUID(); phase = "停止中"; detail = reason
+    func stop(reason: String, completion: ((Bool) -> Void)? = nil) {
+        if shutdownComplete { completion?(true); return }
+        if let completion { stopCallbacks.append(completion) }
+        guard !stopping else { return }
+        active = false; generation = UUID(); phase = "停止処理中"; detail = reason
+        stopping = true; stopFailed = false; stopRequested = false
+        stopAttempt = UUID(); stopStarted = ProcessInfo.processInfo.systemUptime
         timer?.invalidate(); timer = nil
-        listener?.cancel(); listener = nil
-        for relay in sessions.values { relay.cancel() }; sessions.removeAll()
+        publicSession?.invalidateAndCancel(); publicSession = nil
+        listener?.cancel()
+        for client in pending.values { client.cancel() }
+        for relay in sessions.values { relay.cancel() }
         supervisor?.terminate()
-        if let vm = machine {
-            if vm.canStop { vm.stop { [weak self] _ in self?.machine = nil; self?.console = nil; self?.update() } }
-            else { machine = nil; console = nil }
-        }
-        update()
+        stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        update(); advanceStop()
     }
 
-    private func fail(_ message: String) { stop(reason: message); phase = "エラー"; update() }
-    func guestDidStop(_ virtualMachine: VZVirtualMachine) { if active { fail("VMが停止しました") } }
-    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) { if active { fail(error.localizedDescription) } }
+    private func advanceStop() {
+        guard stopping else { return }
+        if let vm = machine {
+            if vm.state == .stopped, !stopRequested {
+                machine = nil; console = nil
+            } else if vm.canStop, !stopRequested {
+                stopRequested = true
+                let attempt = stopAttempt
+                stopMachine(vm) { [weak self] result in
+                    guard let self, self.stopAttempt == attempt, self.stopping else { return }
+                    switch result {
+                    case .failure(let error): self.finishStop(error: "VM停止に失敗: " + error.localizedDescription)
+                    case .success:
+                        guard vm.state == .stopped else {
+                            self.finishStop(error: "VMの停止完了を確認できません"); return
+                        }
+                        self.machine = nil; self.console = nil; self.advanceStop()
+                    }
+                }
+                // テスト用の同期応答を含め、失敗後に完了へ上書きしない。
+                guard stopping else { return }
+            }
+        }
+        if machine == nil, listener == nil, sessions.isEmpty, pending.isEmpty, supervisor == nil {
+            finishStop(error: supervisorUnconfirmed ? "監視役が異常終了したためトンネルの回収は未確認です。再開できません" : nil)
+        } else if ProcessInfo.processInfo.systemUptime - stopStarted >= stopLimit {
+            finishStop(error: "停止期限を超えました。終了未確認のため再開できません")
+        }
+    }
+
+    private func finishStop(error: String?) {
+        guard stopping else { return }
+        stopTimer?.invalidate(); stopTimer = nil; stopping = false
+        stopFailed = error != nil
+        if let error { phase = "停止失敗"; detail = error }
+        else { phase = runError == nil ? "停止完了" : "エラー"; if let runError { detail = runError } }
+        let callbacks = stopCallbacks; stopCallbacks.removeAll()
+        let confirmed = shutdownComplete
+        update()
+        for callback in callbacks { callback(confirmed) }
+    }
+
+    private func fail(_ message: String) { runError = message; stop(reason: message); if shutdownComplete { phase = "エラー"; detail = message; update() } }
+    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        guard machine === virtualMachine else { return }
+        if active { fail("VMが停止しました") } else { advanceStop() }
+    }
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
+        guard machine === virtualMachine else { return }
+        // このdelegate通知はVMが停止したことを示す。単なるstop失敗とは区別する。
+        machine = nil; console = nil
+        if active { fail(error.localizedDescription) } else { advanceStop() }
+    }
     var eventCount: Int { snapshot["total"] as? Int ?? 0 }
 }

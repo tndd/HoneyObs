@@ -57,6 +57,16 @@ const fixture = {
     assert.equal(await page.locator('#url').textContent(),'公開URLなし');
     assert.equal(await page.locator('.packet').count(),0);
     assert.equal(await page.locator('.event').count(),5);
+    // 停止要求や停止失敗を、終了確認済みとして表示しない。
+    for (const phase of ['停止処理中','停止失敗']) {
+      await page.evaluate(s=>window.honeyobs.update(s),{...fixture,active:false,canStart:false,shutdownComplete:false,phase,detail:'終了確認を待っています'});
+      assert.equal(await page.locator('#phase').textContent(),phase);
+      assert.equal(await page.locator('#vm-status').textContent(),'内蔵VM：停止未確認');
+      assert.equal(await page.locator('#toggle').isDisabled(),true);
+      await page.screenshot({path:path.join(output,phase==='停止失敗'?'stop-failed.png':'stopping.png')});
+    }
+    await page.evaluate(s=>window.honeyobs.update(s),{...fixture,active:false,canStart:true,shutdownComplete:true,phase:'停止完了'});
+    assert.equal(await page.locator('#vm-status').textContent(),'内蔵VM：停止確認済み');
     await page.evaluate(s=>window.honeyobs.update(s),{...fixture,session:'new-session',events:[],total:0});
     assert.equal(await page.locator('.event').count(),0);
     assert.equal(await page.locator('#request').textContent(),'—');

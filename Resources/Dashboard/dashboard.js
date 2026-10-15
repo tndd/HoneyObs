@@ -129,15 +129,16 @@
       const ids = new Set(next.events.map(event => event.id));
       if (followNewest || !ids.has(selected)) selected = next.events[0]?.id ?? null;
       seen = ids;
-      document.body.dataset.active = String(next.active); document.body.dataset.error = String(next.phase === 'エラー');
-      q('#phase').textContent = !next.active && !next.canStart && next.phase !== 'エラー' ? '停止処理中' : next.phase;
+      document.body.dataset.active = String(next.active); document.body.dataset.error = String(['エラー', '停止失敗'].includes(next.phase));
+      q('#phase').textContent = next.phase;
       q('#url').textContent = next.active && next.url ? next.url : '公開URLなし';
       q('#engine-detail').textContent = next.detail;
       q('#toggle').textContent = next.active ? '停止' : '一時公開を開始';
       q('#toggle').disabled = !next.active && !next.canStart; q('#local').disabled = !next.canStart;
       q('#copy').hidden = !(next.active && next.url);
       q('#count').textContent = next.total;
-      q('#vm-status').textContent = next.active ? '内蔵VM：動作中 · 受信確認 約1秒ごと' : '内蔵VM：停止中';
+      q('#vm-status').textContent = next.active ? '内蔵VM：動作中 · 受信確認 約1秒ごと' :
+        (next.shutdownComplete ?? next.canStart) ? '内蔵VM：停止確認済み' : '内蔵VM：停止未確認';
       q('#geo-status').textContent = next.geoAvailable ? next.geoEdition : 'GeoIPを読み込めません（位置不明として表示）';
       const signature = JSON.stringify([next.session, next.active, next.events]);
       if (signature !== currentSignature) {
