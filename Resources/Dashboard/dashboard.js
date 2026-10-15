@@ -80,6 +80,8 @@
     q('#ip').textContent = event?.ip || '—';
     q('#time').textContent = event ? date(event.time) : '—';
     q('#request').textContent = event ? `${event.method} ${event.path}` : '—';
+    q('#path-note').hidden = !event?.pathTruncated;
+    q('#path-note').textContent = event?.pathTruncated ? `パスを省略表示 · 元 ${event.pathBytes} バイト · SHA-256 ${event.pathSHA256}` : '';
     q('#response').textContent = event ? `${event.status} · 模擬サービスの応答${event.test ? '（確認用）' : ''}` : '—';
     q('#location').textContent = !event ? '—' : !event.countryCode ? '位置不明（未取得・予約IP・DB未収録）' :
       countries.has(event.countryCode) ? `${event.country} · 国単位の推定` : `${event.country} · 地図の代表位置なし`;
@@ -137,6 +139,10 @@
       q('#toggle').disabled = !next.active && !next.canStart; q('#local').disabled = !next.canStart;
       q('#copy').hidden = !(next.active && next.url);
       q('#count').textContent = next.total;
+      const observation = next.observation ?? {};
+      const reasons = { http_400: 'HTTP拒否400', http_431: 'ヘッダー上限', http_505: 'HTTP版不正', http_incomplete: 'HTTP未完了', http_timeout: 'HTTP読取期限', connection_limit: '接続数上限', guest_connect: 'VM接続失敗', relay_timeout: '中継期限', relay_input_limit: '中継入力上限' };
+      const rejected = Object.entries(observation.rejections ?? {}).map(([key, value]) => `${reasons[key] ?? 'その他'} ${value.count}件`).join(' / ');
+      q('#observation-status').textContent = `保存 ${observation.retained ?? next.events.length} / 4096件 · 取得前の欠落 ${observation.uncollected ?? 0}件 · 保存上限による破棄 ${observation.evicted ?? 0}件 · 取得待ち ${observation.pending ?? 0}件${rejected ? ` · HTTP処理前／入口の拒否: ${rejected}` : ''}`;
       q('#vm-status').textContent = next.active ? '内蔵VM：動作中 · 受信確認 約1秒ごと' :
         (next.shutdownComplete ?? next.canStart) ? '内蔵VM：停止確認済み' : '内蔵VM：停止未確認';
       q('#geo-status').textContent = next.geoAvailable ? next.geoEdition : 'GeoIPを読み込めません（位置不明として表示）';

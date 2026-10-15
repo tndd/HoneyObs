@@ -11,9 +11,10 @@ final class Relay {
     private var stopped = false
     private var received = 0
     private let finished: () -> Void
+    private let rejected: (String) -> Void
 
-    init(client: NWConnection, guest: VZVirtioSocketConnection, finished: @escaping () -> Void) {
-        self.client = client; self.guest = guest; self.finished = finished
+    init(client: NWConnection, guest: VZVirtioSocketConnection, rejected: @escaping (String) -> Void = { _ in }, finished: @escaping () -> Void) {
+        self.client = client; self.guest = guest; self.finished = finished; self.rejected = rejected
     }
 
     func start() {
@@ -26,7 +27,7 @@ final class Relay {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSig, socklen_t(MemoryLayout<Int32>.size))
         client.start(queue: queue)
         queue.async { self.receive() }
-        queue.asyncAfter(deadline: .now() + 6) { self.finish() }
+        queue.asyncAfter(deadline: .now() + 6) { self.finish(reason: "relay_timeout") }
         DispatchQueue.global().async {
             var response = Data()
             var buf = [UInt8](repeating: 0, count: 4096)
@@ -52,7 +53,7 @@ final class Relay {
             guard !self.stopped else { return }
             if let data, !data.isEmpty {
                 self.received += data.count
-                guard self.received <= 32768 else { self.finish(); return }
+                guard self.received <= 32768 else { self.finish(reason: "relay_input_limit"); return }
                 let ok = data.withUnsafeBytes { p -> Bool in
                     var offset = 0
                     while offset < p.count {
@@ -66,11 +67,11 @@ final class Relay {
         }
     }
 
-    private func finish() {
+    private func finish(reason: String? = nil) {
         guard !stopped else { return }; stopped = true
         client.cancel()
         Darwin.shutdown(guest.fileDescriptor, SHUT_RDWR)
-        DispatchQueue.main.async { self.finished() }
+        DispatchQueue.main.async { if let reason { self.rejected(reason) }; self.finished() }
     }
 
     func cancel() { queue.async { self.finish() } }
