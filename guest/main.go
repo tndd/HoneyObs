@@ -4,14 +4,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -71,74 +70,6 @@ func listenVM(port uint32) (*vmListener, error) {
 		return nil, e
 	}
 	return &vmListener{fd}, nil
-}
-
-type Event struct {
-	ID     uint64 `json:"id"`
-	Time   string `json:"time"`
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	IP     string `json:"ip"`
-	Status int    `json:"status"`
-	Test   bool   `json:"test"`
-}
-
-var events struct {
-	sync.Mutex
-	Last  uint64
-	Items []Event
-}
-var boot = time.Now().UTC().Format(time.RFC3339Nano)
-
-func record(r *http.Request, status int) {
-	path := r.URL.EscapedPath()
-	if len(path) > 512 {
-		path = path[:512]
-	}
-	ip := ""
-	if parsed := net.ParseIP(r.Header.Get("Cf-Connecting-Ip")); parsed != nil {
-		ip = parsed.String()
-	}
-	events.Lock()
-	defer events.Unlock()
-	events.Last++
-	events.Items = append(events.Items, Event{events.Last, time.Now().UTC().Format(time.RFC3339Nano), r.Method, path, ip, status, strings.HasPrefix(path, "/honeyobs-test-")})
-	if len(events.Items) > 128 {
-		events.Items = events.Items[len(events.Items)-128:]
-	}
-}
-
-func decoy(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Connection", "close")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// Host値はトンネル起動時に上書きする。公開クライアントの任意値を許可しない。
-	if r.Host != os.Getenv("ORIGIN_HOST") {
-		http.Error(w, "Forbidden", 403)
-		return
-	}
-	if r.ContentLength > 8192 {
-		record(r, 413)
-		http.Error(w, "Request too large", 413)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
-	if _, err := io.Copy(io.Discard, r.Body); err != nil {
-		record(r, 413)
-		http.Error(w, "Request too large", 413)
-		return
-	}
-	status := 404
-	if r.URL.Path == "/login" {
-		status = 401
-	}
-	record(r, status)
-	w.WriteHeader(status)
-	if status == 401 {
-		io.WriteString(w, "Authentication failed\n")
-	} else {
-		io.WriteString(w, "Not found\n")
-	}
 }
 
 func isolation(targets []string) map[string]any {
@@ -204,9 +135,8 @@ func control(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(isolation(targets))
 		return
 	}
-	events.Lock()
-	defer events.Unlock()
-	json.NewEncoder(w).Encode(map[string]any{"boot": boot, "uid": os.Getuid(), "events": events.Items, "total": events.Last})
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	json.NewEncoder(w).Encode(snapshot(after, os.Getuid()))
 }
 
 func serve() {
@@ -219,7 +149,13 @@ func serve() {
 			log.Fatal(err)
 		}
 		s := &http.Server{Handler: v.handler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 4 * time.Second, WriteTimeout: 4 * time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096}
-		go func() { log.Fatal(s.Serve(l)) }()
+		var listener net.Listener = l
+		if v.port == 7000 {
+			listener = &observingListener{Listener: l}
+			s.ConnContext = observationContext
+			s.ConnState = observationState
+		}
+		go func() { log.Fatal(s.Serve(listener)) }()
 	}
 	fmt.Println("HONEYOBS_READY uid=", os.Getuid())
 	select {}

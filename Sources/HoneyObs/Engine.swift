@@ -43,7 +43,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private let stopLimit: TimeInterval
     private let healthLimit: TimeInterval
     private let stopMachine: (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void
-    private let readGuest: (VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void
+    private let readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)?
+    private var observations = ObservationStore()
+    private var lastArchive = Data()
+    private var hostRejections: [String: ObservationStore.Rejection] = [:]
     private(set) var events: [ObservedEvent] = []
     private(set) var sessionID = UUID().uuidString
     var shutdownComplete: Bool {
@@ -55,7 +58,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
 
     init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
-         readGuest: @escaping (VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void = { vm, done in guestRequest(vm, completion: done) }) throws {
+         readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil) throws {
         self.directory = directory; self.resources = resources
         self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
         self.readGuest = readGuest
@@ -87,7 +90,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
         runError = nil; lastGuestReply = ProcessInfo.processInfo.systemUptime
         generation = UUID(); let current = generation
-        sessionID = generation.uuidString; events = []
+        sessionID = generation.uuidString; events = []; observations = ObservationStore(); lastArchive = Data(); hostRejections = [:]
         originHost = UUID().uuidString.lowercased() + ".invalid"
         started = Date(); tunnelStarted = false; diagnosticsStarted = false; snapshot = [:]
         localPort = 0; polling = false; update()
@@ -143,18 +146,31 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         readTunnelURL()
         guard !polling else { return }; polling = true
         let current = generation
-        readGuest(machine) { [weak self] result in
+        let read = readGuest ?? { vm, done in guestRequest(vm, path: "/?after=\(self.observations.lastID)", completion: done) }
+        read(machine) { [weak self] result in
             guard let self, self.active, self.generation == current else { return }
             self.polling = false
             guard case .success(let data) = result,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   json["uid"] as? Int == 65534 else { return }
             self.lastGuestReply = ProcessInfo.processInfo.systemUptime
-            if (self.snapshot["total"] as? Int) != (json["total"] as? Int) || (self.snapshot["boot"] as? String) != (json["boot"] as? String) {
-                self.save(json, name: "events.json")
-            }
+            do {
+                try self.observations.ingest(data)
+                let archive = try self.observations.encoded()
+                if archive != self.lastArchive {
+                    try archive.write(to: self.directory.appendingPathComponent("events.json"), options: .atomic)
+                    self.lastArchive = archive
+                }
+            } catch { self.fail("観測の取得・保存失敗: " + error.localizedDescription); return }
             self.snapshot = json
-            self.events = Array(((try? JSONDecoder().decode(EventSnapshot.self, from: data).events) ?? []).suffix(128))
+            self.events = Array(self.observations.events.suffix(128))
+            self.saveObservationStatus()
+            if self.observations.pending > 0 {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.active, self.generation == current else { return }
+                    self.tick()
+                }
+            }
             if !self.tunnelStarted {
                 self.tunnelStarted = true
                 if self.wantsPublic { self.startOrigin() } else { self.phase = "ローカル準備完了"; self.update() }
@@ -193,8 +209,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             server.newConnectionHandler = { [weak self] client in
                 guard let self, self.active, self.generation == current,
-                      self.pending.count + self.sessions.count < 8,
                       let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { client.cancel(); return }
+                guard self.pending.count + self.sessions.count < 8 else {
+                    self.recordHostRejection("connection_limit"); client.cancel(); return
+                }
                 let pendingID = UUID(); self.pending[pendingID] = client
                 device.connect(toPort: 7000) { result in
                     self.pending.removeValue(forKey: pendingID)
@@ -204,10 +222,13 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                         self.advanceStop(); return
                     }
                     switch result {
-                    case .failure: client.cancel()
+                    case .failure: self.recordHostRejection("guest_connect"); client.cancel()
                     case .success(let guest):
                         let id = UUID()
-                        let relay = Relay(client: client, guest: guest) { [weak self] in
+                        let relay = Relay(client: client, guest: guest, rejected: { [weak self] reason in
+                            guard let self, self.generation == current else { return }
+                            self.recordHostRejection(reason)
+                        }) { [weak self] in
                             self?.sessions.removeValue(forKey: id); self?.advanceStop()
                         }
                         self.sessions[id] = relay; relay.start()
@@ -356,5 +377,19 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         machine = nil; console = nil
         if active { fail(error.localizedDescription) } else { advanceStop() }
     }
-    var eventCount: Int { snapshot["total"] as? Int ?? 0 }
+    var eventCount: UInt64 { observations.total }
+    var observationStatus: [String: Any] {
+        var rejected: [String: Any] = [:]
+        for (reason, value) in observations.rejections.merging(hostRejections, uniquingKeysWith: { _, host in host }) {
+            rejected[reason] = ["count": value.count, "lastTime": value.lastTime]
+        }
+        return ["retained": observations.events.count, "uncollected": observations.uncollected,
+                "evicted": observations.evicted, "pending": observations.pending, "rejections": rejected]
+    }
+    private func saveObservationStatus() { save(observationStatus, name: "observation.json") }
+    private func recordHostRejection(_ reason: String) {
+        var entry = hostRejections[reason] ?? .init(count: 0, lastTime: "")
+        entry.count += 1; entry.lastTime = ISO8601DateFormatter().string(from: Date())
+        hostRejections[reason] = entry; saveObservationStatus(); onChange?()
+    }
 }

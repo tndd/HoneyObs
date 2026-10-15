@@ -48,7 +48,7 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         guard ready else { return }
         let payload: [String: Any] = ["session": engine.sessionID, "phase": engine.phase,
             "active": engine.isActive, "canStart": engine.canStart, "shutdownComplete": engine.shutdownComplete, "url": engine.publicURL,
-            "detail": engine.detail, "total": engine.eventCount,
+            "detail": engine.detail, "total": engine.eventCount, "observation": engine.observationStatus,
             "events": engine.events.reversed().map { $0.presentation(geo: geo) },
             "geoAvailable": geo.available, "geoEdition": GeoIP.edition]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), data != lastPayload else { return }
