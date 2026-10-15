@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>HoneyObs</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <script src="world-map.js" defer></script>
+  <script src="dashboard.js" defer></script>
+</head>
+<body>
+  <main id="dashboard">
+    <header class="top"><span class="brand">HoneyObs</span><span class="edition">ローカル観測</span></header>
+    <section class="toolbar" aria-label="観測の操作">
+      <div class="connection"><div class="status" role="status"><span class="dot"></span><span id="phase">読み込み中</span></div><div id="url" class="url">公開URLなし</div><div id="engine-detail" class="muted"></div></div>
+      <div class="actions"><button id="copy" hidden>URLをコピー</button><button id="local" disabled>ローカル検証</button><button id="toggle" class="primary" disabled>一時公開を開始</button></div>
+    </section>
+    <div class="body">
+      <section class="map-wrap" aria-label="日本中心のアクセス地図">
+        <div class="map-heading"><h1>世界のアクセス <span>日本中心</span></h1><div class="muted">受信 <b id="count">0</b> 件</div></div>
+        <svg class="map" viewBox="0 0 800 370" role="img" aria-label="受信したアクセスの国別推定位置と日本の表示上の観測点"><path id="graticule"/><g id="land"></g><g id="routes"></g><g id="points"></g></svg>
+        <span id="home-label">日本 · 表示上の観測点</span>
+        <div class="map-note"><span class="legend">受信経路</span><span id="map-note">受信を待っています</span></div>
+      </section>
+      <section class="stream" aria-label="最近のアクセス">
+        <div class="list-heading"><h2>最近のアクセス</h2><span class="muted" id="retained">最新128件</span></div>
+        <p class="empty" id="empty">一時公開を開始すると、ここに受信したアクセスが表示されます。</p>
+        <ol id="events"></ol>
+      </section>
+      <section class="detail" aria-label="アクセス詳細">
+        <h2>アクセス詳細</h2>
+        <div class="identity"><div id="country">アクセスを選択</div><div id="ip">—</div></div>
+        <dl><div><dt>受信日時</dt><dd id="time">—</dd></div><div><dt>リクエスト</dt><dd id="request">—</dd></div><div><dt>応答</dt><dd id="response">—</dd></div><div><dt>位置情報</dt><dd id="location">—</dd></div></dl>
+        <p class="detail-note" id="detail-note">国単位の推定です。点は国の代表位置を表し、通信相手やこのMacの実際の位置を示すものではありません。</p>
+      </section>
+    </div>
+    <footer><span id="vm-status">内蔵VM：停止中</span><span id="geo-status"></span><span><a href="https://db-ip.com">IP Geolocation by DB-IP</a> · <a href="https://www.naturalearthdata.com">Natural Earth</a></span></footer>
+    <div id="announcement" class="sr-only" aria-live="polite"></div>
+  </main>
+</body>
+</html>

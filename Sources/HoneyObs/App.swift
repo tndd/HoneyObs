@@ -3,15 +3,6 @@ import Darwin
 
 private var watchdogStop: sig_atomic_t = 0
 
-// 通常表示とビュー単体の画像取得で、同じ不透明な背景を描く。
-final class WindowSurface: NSView {
-    override var isOpaque: Bool { true }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
-    }
-}
-
 func watchdog(_ args: [String]) {
     guard args.count > 5, let parent = Int32(args[2]) else { exit(2) }
     signal(SIGTERM) { _ in watchdogStop = 1 }
@@ -51,20 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine: Engine
     let headless: Bool
     private var window: NSWindow?
-    private let status = NSTextField(labelWithString: "停止中")
-    private let url = NSTextField(labelWithString: "")
-    private let info = NSTextField(wrappingLabelWithString: "")
-    private let count = NSTextField(labelWithString: "受信: 0件")
+    private var dashboard: Dashboard?
     private var sources: [DispatchSourceSignal] = []
     private var statusTimer: Timer?
     private let uiSmoke: Bool
     private let uiPublicSmoke: Bool
+    private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke")
     private var smokeStage = 0
-    private var localButton: NSButton!
-    private var publicButton: NSButton!
-    private var stopButton: NSButton!
 
-    init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) { self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke }
+    init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) {
+        self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         engine.onChange = { [weak self] in self?.refresh() }
@@ -74,76 +62,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { [weak self] in self?.engine.stop(reason: "終了シグナル"); DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) } }
             source.resume(); sources.append(source)
         }
-        if headless {
-            engine.start(publish: CommandLine.arguments.contains("--public"))
-        } else {
-            createWindow()
-            if uiSmoke { localButton.performClick(nil) }
-            if uiPublicSmoke { publicButton.performClick(nil) }
-        }
-        // 操作不能を防ぐため、状態保存の成否とは独立してUIを更新する。
+        if headless { engine.start(publish: CommandLine.arguments.contains("--public")) }
+        else { createWindow() }
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
     private func createWindow() {
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        NSApp.applicationIconImage = NSImage(contentsOf: engine.resources.appendingPathComponent("AppIcon.icns"))
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let submenu = NSMenu(); submenu.addItem(withTitle: "HoneyObsを終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = submenu; NSApp.mainMenu = menu
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 390), styleMask: [.titled,.closable,.miniaturizable], backing: .buffered, defer: false)
-        window.title = "HoneyObs — 内蔵VM・一時公開の技術検証"
-        window.contentView = WindowSurface(frame: NSRect(x: 0, y: 0, width: 660, height: 390))
-        let heading = NSTextField(labelWithString: "HoneyObs")
-        heading.font = .systemFont(ofSize: 28, weight: .semibold)
-        status.font = .systemFont(ofSize: 20, weight: .medium)
-        url.isSelectable = true; url.lineBreakMode = .byTruncatingMiddle
-        info.maximumNumberOfLines = 4
-        let caption = NSTextField(wrappingLabelWithString: "内蔵Linux VMで模擬応答を返します。VMにネットワーク機器・共有フォルダはありません。一時公開にはCloudflareを利用します。地図は今回の試作に含みません。")
-        caption.textColor = .secondaryLabelColor
-        localButton = NSButton(title: "ローカル検証", target: self, action: #selector(localStart))
-        publicButton = NSButton(title: "一時公開を開始", target: self, action: #selector(publicStart))
-        stopButton = NSButton(title: "停止", target: self, action: #selector(stop))
-        let buttons = NSStackView(views: [localButton,publicButton,stopButton]); buttons.spacing = 12
-        let stack = NSStackView(views: [heading,caption,status,url,count,info,buttons]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let content = window.contentView!; content.addSubview(stack)
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 26)])
-        self.window = window; window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        appItem.submenu = submenu
+        let editItem = NSMenuItem(); menu.addItem(editItem)
+        let edit = NSMenu(title: "編集")
+        edit.addItem(withTitle: "コピー", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "すべて選択", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit; NSApp.mainMenu = menu
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 820), styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+        window.title = "HoneyObs — 世界のアクセス"
+        window.contentMinSize = NSSize(width: 860, height: 650)
+        window.backgroundColor = NSColor(calibratedRed: 0.047, green: 0.094, blue: 0.137, alpha: 1)
+        let dashboard = Dashboard(engine: engine)
+        dashboard.onReady = { [weak self] in
+            guard let self else { return }
+            if self.uiSmoke { self.dashboard?.testAction("local") }
+            if self.uiPublicSmoke { self.dashboard?.testAction("public") }
+        }
+        window.contentView = dashboard.webView
+        self.dashboard = dashboard; self.window = window
+        window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         refresh()
     }
 
-    @objc private func localStart() { engine.start(publish: false) }
-    @objc private func publicStart() { engine.start(publish: true) }
-    @objc private func stop() { engine.stop(reason: "停止ボタン") }
-
     private func refresh() {
-        status.stringValue = engine.phase; url.stringValue = engine.publicURL.isEmpty ? "公開URLなし" : engine.publicURL
-        info.stringValue = engine.detail; count.stringValue = "受信: \(engine.eventCount)件（確認用アクセスを含む）"
-        let canStart = engine.phase == "停止中" || engine.phase == "エラー"
-        localButton?.isEnabled = canStart; publicButton?.isEnabled = canStart; stopButton?.isEnabled = !canStart
+        dashboard?.refresh()
+        if dashboardSmoke {
+            dashboard?.testState()
+            let command = engine.directory.appendingPathComponent("ui-command")
+            if let value = try? String(contentsOf: command, encoding: .utf8) {
+                try? FileManager.default.removeItem(at: command)
+                switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
+                case "capture": dashboard?.capture(to: engine.directory.appendingPathComponent("ui-capture.png"))
+                case "resize": window?.setContentSize(NSSize(width: 860, height: 650))
+                case "quit": NSApp.terminate(nil)
+                case let action: dashboard?.testAction(action)
+                }
+            }
+        }
         if uiSmoke, engine.phase == "ローカル準備完了", smokeStage == 0 {
             smokeStage = 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                self.capture("ui-local.png"); self.stopButton.performClick(nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.capture("ui-stopped.png"); NSApp.terminate(nil) }
+                self.dashboard?.capture(to: self.engine.directory.appendingPathComponent("ui-local.png")) {
+                    self.dashboard?.testAction("stop")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.dashboard?.capture(to: self.engine.directory.appendingPathComponent("ui-stopped.png")) { NSApp.terminate(nil) }
+                    }
+                }
             }
         }
         if uiPublicSmoke, engine.phase == "公開中", smokeStage == 0 {
             smokeStage = 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.capture("ui-public.png"); NSApp.terminate(nil)
+                self.dashboard?.capture(to: self.engine.directory.appendingPathComponent("ui-public.png")) { NSApp.terminate(nil) }
             }
         }
     }
 
-    private func capture(_ name: String) {
-        guard let view = window?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-        view.cacheDisplay(in: view.bounds, to: rep)
-        try? rep.representation(using: .png, properties: [:])?.write(to: engine.directory.appendingPathComponent(name))
-    }
-
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         engine.stop(reason: "アプリ終了")
-        // プロセス終了でVMも破棄される。トンネルの回収は親の死を検出する監視プロセスに任せる。
         return .terminateNow
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
