@@ -76,3 +76,34 @@ GeoIP試験中、GoogleのIPv6アドレスを米国と仮定した期待値が�
 GUI検証記録：`test-results/dashboard-20261015-161057/report.json`。国は推定、地図の点は国の代表位置です。日本の終点は表示上の基準であり、Macの位置を取得していません。実スリープ、別回線からの独立アクセス、自然流入、一般配布用の署名・公証は引き続き未検証です。
 
 GUI追加後の回帰検証でも、ローカルVMの9種類の隔離プローブ、公開経路・IP照合・入力制限・通常停止、強制終了時のトンネル回収、スリープ通知ハンドラ、公開中のネイティブアプリ通常終了が合格しました。回帰記録は `test-results/verification-20261015-161057/` と `test-results/ui-20261015-161243/`、今回のアプリは約92 MiBです。
+
+## 停止経路の優先修正（2026-10-15）
+
+全体構成の改修を保留し、[実装戦略](safety-strategy.md)に沿って停止結果確認・終了待機・VM応答期限だけを先行しました。追加VM、launchd管理、通信先制限は製品に導入していません。
+
+| 検証 | 結果・範囲 |
+|---|---|
+| ビルド・署名検査 | `bash scripts/build.sh` 合格 |
+| 実VMの停止境界 | `bash tests/lifecycle.sh` 合格。起動直後OFFを3回、停止連打、停止APIの失敗・無応答、古い完了通知、観測応答コールバック喪失を検証。API境界への故障注入であり、カーネル故障の再現とは区別する |
+| 修正前相当の検出 | 停止API失敗を無視して参照を外す変異を一時的なテスト用ソースに導入し、「停止API失敗を停止完了として扱った」でテストが失敗することを確認。製品ソースには適用していない |
+| 実公開・既存の回帰 | `python3 tests/integration.py` 合格。ローカル隔離、実公開、IP、入力制限、通常停止、アプリ強制終了、スリープ通知ハンドラ。停止確認はactive=falseだけでなくshutdownComplete=trueを待つよう強化 |
+| 実アプリの終了・監視役故障 | `python3 tests/stop_edges.py` 合格。終了時にVM停止を待ち、監視役SIGKILLでは回収未確認として再開を禁止する。監視役故障時の全回収を証明したとは扱わない。成否判定は試験用cleanupより前 |
+| ネイティブUI | `python3 tests/ui_smoke.py` 合格。ローカル停止と公開中のアプリ終了後にshutdownCompleteとVM・トンネルの終了を確認 |
+| 実受信から停止・再開 | `python3 tests/dashboard_smoke.py` 合格。実公開受信→地図・行選択→停止完了・履歴保持→ローカル再開→終了。取得した停止画面を目視確認 |
+| ブラウザ画面 | `npm test` 合格。停止処理中・停止失敗では「停止未確認」と表示し、開始操作を無効化。画像で両状態を目視確認。従来の選択・不正HTML文字列・通信なし等の検証も合格 |
+
+AppKitの終了待ちを初めにterminateLaterで実装したところ、実アプリの起動時終了試験で停止処理が進まず12秒で失敗しました。通常イベントループで回収してから再度終了する方法へ修正し、失敗した試験とネイティブの公開中終了を再実行して合格しました。
+
+記録：
+
+- `test-results/lifecycle-82DC498E-8636-47E4-8F8F-A60444858CDC/report.json`
+- `test-results/lifecycle-mutation/report.json`
+- `test-results/verification-20261015-213735/report.json`
+- `test-results/verification-20261015-214431/stop-edges-report.json`
+- `test-results/ui-20261015-214441/report.json`
+- `test-results/dashboard-20261015-214617/report.json`
+- `test-results/dashboard-browser/stopping.png`、`stop-failed.png`
+
+試験後にHoneyObs、cloudflared、仮想化実行プロセスの残存がないことを確認しました。ネイティブGUI操作は既存のテスト入口からボタンの処理を呼ぶ方式です。Playwrightでのボタンクリックと、実VMを伴うネイティブWebKitの試験を分けて記録しており、OS全体を人が操作した検証ではありません。アプリ内組み込みブラウザは使っていません。
+
+実スリープ、OSログアウト／シャットダウン、別端末・別回線からの独立アクセス、アプリ／監視役のフリーズからの完全回収、長時間高負荷、Mac側通信制限は今回の対象外または未検証です。#2〜#7の全体保証は未達であり、この先行修正でIssueを閉じません。

@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let uiPublicSmoke: Bool
     private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke")
     private var smokeStage = 0
+    private var terminationPending = false
 
     init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) {
         self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke
@@ -59,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler { [weak self] in self?.engine.stop(reason: "終了シグナル"); DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) } }
+            source.setEventHandler { NSApp.terminate(nil) }
             source.resume(); sources.append(source)
         }
         if headless { engine.start(publish: CommandLine.arguments.contains("--public")) }
@@ -129,8 +130,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        engine.stop(reason: "アプリ終了")
-        return .terminateNow
+        if engine.shutdownComplete { return .terminateNow }
+        guard !terminationPending else { return .terminateCancel }
+        terminationPending = true
+        engine.stop(reason: "アプリ終了") { [weak self] success in
+            // terminateLaterのネストしたモーダルループでVMの主キュー応答を止めない。
+            // 元の終了要求を取り消し、通常ループで回収した後に改めて終了する。
+            DispatchQueue.main.async {
+                self?.terminationPending = false
+                if success { sender.terminate(nil) }
+                else {
+                    self?.window?.makeKeyAndOrderFront(nil)
+                    sender.activate(ignoringOtherApps: true)
+                }
+            }
+        }
+        return .terminateCancel
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

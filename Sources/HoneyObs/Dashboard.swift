@@ -47,7 +47,7 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     func refresh() {
         guard ready else { return }
         let payload: [String: Any] = ["session": engine.sessionID, "phase": engine.phase,
-            "active": engine.isActive, "canStart": engine.canStart, "url": engine.publicURL,
+            "active": engine.isActive, "canStart": engine.canStart, "shutdownComplete": engine.shutdownComplete, "url": engine.publicURL,
             "detail": engine.detail, "total": engine.eventCount,
             "events": engine.events.reversed().map { $0.presentation(geo: geo) },
             "geoAvailable": geo.available, "geoEdition": GeoIP.edition]

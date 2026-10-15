@@ -20,6 +20,7 @@ def main():
                 assert process.returncode == 0, process.returncode
                 state = read(directory / 'state.json')
                 assert state['active'] is False
+                assert state['shutdownComplete'] is True
                 if name == 'local':
                     assert (directory / 'ui-local.png').is_file()
                     assert (directory / 'ui-stopped.png').is_file()
