@@ -5,6 +5,7 @@
   const map = window.HoneyObsMap;
   const countries = new Map(map.countries.map(country => [country.code, country]));
   let state = { events: [], session: '', active: false }, selected = null, followNewest = true;
+  let rejectionCounts = {};
   let seen = new Set(), animations = [], currentSignature = '', totalSeen = null;
   const svg = (name, attributes) => {
     const element = document.createElementNS(NS, name);
@@ -73,6 +74,7 @@
     const missing = state.events.filter(item => !countries.get(item.countryCode)).length;
     q('#map-note').textContent = event && !d ? 'このアクセスは地図位置なし · 一覧に保持' : `国単位の推定 · 地図位置なし ${missing} 件`;
     placeLabel();
+    if (state.exercise) { q('#map-note').textContent = '通信元はlocalhost · 位置の演出なし'; q('#home-label').textContent = 'おとりVM · 表示上の観測点'; }
   }
   function details() {
     const event = state.events.find(item => item.id === selected);
@@ -83,7 +85,7 @@
     q('#path-note').hidden = !event?.pathTruncated;
     q('#path-note').textContent = event?.pathTruncated ? `パスを省略表示 · 元 ${event.pathBytes} バイト · SHA-256 ${event.pathSHA256}` : '';
     q('#response').textContent = event ? `${event.status} · 模擬サービスの応答${event.test ? '（確認用）' : ''}` : '—';
-    q('#location').textContent = !event ? '—' : !event.countryCode ? '位置不明（未取得・予約IP・DB未収録）' :
+    q('#location').textContent = state.exercise ? 'localhostからの試験 · ヘッダーのIPを地理推定に使いません' : !event ? '—' : !event.countryCode ? '位置不明（未取得・予約IP・DB未収録）' :
       countries.has(event.countryCode) ? `${event.country} · 国単位の推定` : `${event.country} · 地図の代表位置なし`;
   }
   function renderEvents() {
@@ -125,7 +127,7 @@
   window.honeyobs = {
     update(next) {
       const reset = state.session !== next.session;
-      if (reset) { selected = null; followNewest = true; seen = new Set(); currentSignature = ''; totalSeen = null; }
+      if (reset) { selected = null; followNewest = true; seen = new Set(); currentSignature = ''; totalSeen = null; rejectionCounts = {}; q('#shield').hidden = true; }
       const fresh = next.events.filter(event => !seen.has(event.id));
       state = next;
       const ids = new Set(next.events.map(event => event.id));
@@ -138,11 +140,45 @@
       q('#toggle').textContent = next.active ? '停止' : '一時公開を開始';
       q('#toggle').disabled = !next.active && !next.canStart; q('#local').disabled = !next.canStart;
       q('#copy').hidden = !(next.active && next.url);
+      q('#exercise-panel').hidden = !next.exercise;
+      q('#local').hidden = Boolean(next.exercise);
+      if (next.exercise) {
+        const exercise = next.exercise;
+        q('#exercise-panel').dataset.sequence = String(exercise.sequence ?? 0);
+        q('#exercise-scenario').textContent = exercise.scenario ?? '準備中';
+        q('#exercise-stage').textContent = exercise.stage ?? '待機';
+        q('#exercise-response').textContent = exercise.response ?? '未受信';
+        q('#exercise-record').textContent = exercise.record ?? '未確認';
+        q('#toggle').textContent = '自己ペネを中止';
+        q('#toggle').disabled = !next.active || Boolean(exercise.finished);
+        q('#copy').hidden = true;
+      }
       q('#count').textContent = next.total;
       const observation = next.observation ?? {};
       const reasons = { http_400: 'HTTP拒否400', http_431: 'ヘッダー上限', http_505: 'HTTP版不正', http_incomplete: 'HTTP未完了', http_timeout: 'HTTP読取期限', connection_limit: '接続数上限', guest_connect: 'VM接続失敗', relay_timeout: '中継期限', relay_input_limit: '中継入力上限' };
       const rejected = Object.entries(observation.rejections ?? {}).map(([key, value]) => `${reasons[key] ?? 'その他'} ${value.count}件`).join(' / ');
       q('#observation-status').textContent = `保存 ${observation.retained ?? next.events.length} / 4096件 · 取得前の欠落 ${observation.uncollected ?? 0}件 · 保存上限による破棄 ${observation.evicted ?? 0}件 · 取得待ち ${observation.pending ?? 0}件${rejected ? ` · HTTP処理前／入口の拒否: ${rejected}` : ''}`;
+      const increments = Object.entries(observation.rejections ?? {}).filter(([key, value]) => value.count > (rejectionCounts[key] ?? 0));
+      let shieldTitle = '', shieldNote = '', shieldKind = 'received';
+      if (increments.length) {
+        shieldTitle = '拒否を記録'; shieldKind = 'reject';
+        shieldNote = increments.map(([key, value]) => `${reasons[key] ?? 'その他'} +${value.count - (rejectionCounts[key] ?? 0)}件`).join(' / ');
+      } else if (fresh.length) {
+        const event = fresh[0];
+        shieldKind = [400,401,403,413,431,505].includes(event.status) ? 'reject' : 'received';
+        shieldTitle = `HTTP ${event.status} · ${event.status === 401 ? '認証失敗' : shieldKind === 'reject' ? '拒否' : '受信'}`;
+        shieldNote = `イベント ${fresh.length}件を取得`;
+      }
+      rejectionCounts = Object.fromEntries(Object.entries(observation.rejections ?? {}).map(([key,value]) => [key,value.count]));
+      if (next.active && shieldTitle) {
+        q('#shield').hidden = false; q('#shield').dataset.kind = shieldKind;
+        q('#shield-title').textContent = shieldTitle; q('#shield-note').textContent = shieldNote;
+        q('#shield').classList.remove('pulse');
+        if (!document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          void q('#shield').offsetWidth; q('#shield').classList.add('pulse');
+        }
+      }
+      if (!next.active) q('#shield').classList.remove('pulse');
       q('#vm-status').textContent = next.active ? '内蔵VM：動作中 · 受信確認 約1秒ごと' :
         (next.shutdownComplete ?? next.canStart) ? '内蔵VM：停止確認済み' : '内蔵VM：停止未確認';
       q('#geo-status').textContent = next.geoAvailable ? next.geoEdition : 'GeoIPを読み込めません（位置不明として表示）';

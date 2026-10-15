@@ -82,6 +82,20 @@ GeoIPもビルド時に取得・検証し、IPv4/IPv6の固定長範囲データ
 
 `Resources/Brand/AppIcon.png` は採用アイコンのビルド入力、`Resources/Dashboard/world-map.js` はアプリが直接利用する地図資産です。インストール後の外部取得をなくすためGit管理します。検証スクリーンショットとは区別しています。地図を再生成する開発者だけはNode.jsで `node scripts/build_map.cjs` を実行します。通常のアプリビルドにNode.jsは不要です。
 
+## GUIでlocalhost自己ペネを見る
+
+ビルド後、開発用のPython 3で次を実行します。
+
+```sh
+python3 tests/self_pentest.py --gui
+```
+
+実VMに既存の20ケース・160件の連続送信・低速接続を送り、製品のGUIに試験名、実際のHTTP応答、ログとの照合結果を順次表示します。観測は約1秒周期です。右下の小さなシールドは新しく観測した受信・拒否に反応し、404を防御成功とは表示しません。要求本文や秘密Hostは進行表示へ渡しません。
+
+試験用の入口は127.0.0.1だけで待ち受け、cloudflaredを起動しません。この画面では公開操作をネイティブ側でも無効化します。「自己ペネを中止」、ウィンドウを閉じる操作、アプリ終了でVMと入口を停止します。正常完了時は停止済みの結果画面だけが残ります。自動検証では `--close-after` を追加すると画面も閉じます。再実行は同じコマンドを実行してください。
+
+記録と画面画像は `test-results/self-pentest-*/` に保存します。これは開発用の試験起動経路で、通常のアプリから試験を起動するボタンはありません。localhost試験では申告IPを地理推定に使用せず、地図上の架空の攻撃経路は描画しません。
+
 ## 検証
 
 ```sh
@@ -111,6 +125,10 @@ swiftc Sources/HoneyObs/GeoIP.swift Sources/HoneyObs/ObservedEvent.swift tests/G
 npm ci
 npx playwright install chromium
 npm test
+node tests/live_dashboard.cjs
+
+# 実GUIから自己ペネを中止し、VM・入口の停止を確認
+python3 tests/live_pentest_cancel.py
 ```
 
 公開を含むテストはCloudflareで一時URLを発行します。`integration.py` は通常停止、SIGKILLによるアプリ強制終了、スリープ通知ハンドラをそれぞれ公開状態から検査します。送信元確認は同じ公開ホストのCloudflare traceとIPv4で比較します。名前解決やTLS検証を迂回しません。

@@ -10,6 +10,8 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var ready = false
     private var lastPayload = Data()
     var onReady: (() -> Void)?
+    var exercise: [String: Any]?
+    var onExerciseStop: (() -> Void)?
 
     init(engine: Engine) {
         self.engine = engine
@@ -30,6 +32,11 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         guard message.frameInfo.isMainFrame,
               message.frameInfo.request.url?.standardizedFileURL == documentURL.standardizedFileURL,
               let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
+        // 自己ペネ画面から公開・再起動を指示できないよう、ネイティブ側でも制限する。
+        if exercise != nil, action != "ready" {
+            if action == "stop" { onExerciseStop?() }
+            return
+        }
         switch action {
         case "ready": ready = true; refresh(); onReady?()
         case "start-local": engine.start(publish: false)
@@ -46,11 +53,20 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     func refresh() {
         guard ready else { return }
-        let payload: [String: Any] = ["session": engine.sessionID, "phase": engine.phase,
+        var payload: [String: Any] = ["session": engine.sessionID, "phase": engine.phase,
             "active": engine.isActive, "canStart": engine.canStart, "shutdownComplete": engine.shutdownComplete, "url": engine.publicURL,
             "detail": engine.detail, "total": engine.eventCount, "observation": engine.observationStatus,
             "events": engine.events.reversed().map { $0.presentation(geo: geo) },
             "geoAvailable": geo.available, "geoEdition": GeoIP.edition]
+        if let exercise {
+            payload["exercise"] = exercise
+            // ヘッダー偽装試験の申告IPを、実際の通信元の位置として地図に載せない。
+            payload["events"] = engine.events.reversed().map { event -> [String: Any] in
+                var value = event.presentation(geo: geo)
+                value["countryCode"] = ""; value["country"] = "ローカル試験"
+                return value
+            }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), data != lastPayload else { return }
         lastPayload = data
         // リクエスト文字列をコードとして連結せず、構造化された引数で渡す。
@@ -107,6 +123,13 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
           canStart:!document.querySelector('#local').disabled,
           url:document.querySelector('#url').textContent,
           width:innerWidth,height:innerHeight,
+          exerciseStage:document.querySelector('#exercise-stage').textContent,
+          exerciseScenario:document.querySelector('#exercise-scenario').textContent,
+          exerciseResponse:document.querySelector('#exercise-response').textContent,
+          exerciseRecord:document.querySelector('#exercise-record').textContent,
+          shield:document.querySelector('#shield-title').textContent,
+          shieldNote:document.querySelector('#shield-note').textContent,
+          exerciseSequence:document.querySelector('#exercise-panel').dataset.sequence || '',
           overflow:document.documentElement.scrollWidth>innerWidth }))()
         """
         webView.evaluateJavaScript(script) { [weak self] value, _ in
