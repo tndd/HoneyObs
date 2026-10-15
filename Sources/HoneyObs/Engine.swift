@@ -29,6 +29,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var publicCheckStarted = Date()
     private var snapshot: [String: Any] = [:]
     private var sleepObserver: NSObjectProtocol?
+    private(set) var events: [ObservedEvent] = []
+    private(set) var sessionID = UUID().uuidString
+    var canStart: Bool { !active && machine == nil && supervisor == nil }
+    var isActive: Bool { active }
 
     init(directory: URL, resources: URL) throws {
         self.directory = directory; self.resources = resources
@@ -55,9 +59,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     }
 
     func start(publish: Bool) {
-        guard machine == nil, supervisor == nil else { return }
+        guard canStart else { return }
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
         generation = UUID(); let current = generation
+        sessionID = generation.uuidString; events = []
         originHost = UUID().uuidString.lowercased() + ".invalid"
         started = Date(); tunnelStarted = false; diagnosticsStarted = false; snapshot = [:]
         localPort = 0; polling = false; update()
@@ -117,6 +122,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 self.save(json, name: "events.json")
             }
             self.snapshot = json
+            self.events = Array(((try? JSONDecoder().decode(EventSnapshot.self, from: data).events) ?? []).suffix(128))
             if !self.tunnelStarted {
                 self.tunnelStarted = true
                 if self.wantsPublic { self.startOrigin() } else { self.phase = "ローカル準備完了"; self.update() }

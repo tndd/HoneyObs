@@ -1,0 +1,154 @@
+'use strict';
+(() => {
+  const q = selector => document.querySelector(selector);
+  const NS = 'http://www.w3.org/2000/svg';
+  const map = window.HoneyObsMap;
+  const countries = new Map(map.countries.map(country => [country.code, country]));
+  let state = { events: [], session: '', active: false }, selected = null, followNewest = true;
+  let seen = new Set(), animations = [], currentSignature = '', totalSeen = null;
+  const svg = (name, attributes) => {
+    const element = document.createElementNS(NS, name);
+    for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+    return element;
+  };
+  q('#graticule').setAttribute('d', map.graticule);
+  for (const country of map.countries) q('#land').append(svg('path', {
+    d: country.path, 'data-country': country.code, class: country.code === 'JP' ? 'japan' : ''
+  }));
+  function action(name) {
+    window.webkit?.messageHandlers.honeyobs.postMessage({ action: name });
+  }
+  q('#local').onclick = () => action('start-local');
+  q('#toggle').onclick = () => action(state.active ? 'stop' : 'start-public');
+  q('#copy').onclick = () => action('copy-url');
+  const date = time => {
+    const value = new Date(time);
+    return Number.isNaN(value.getTime()) ? '時刻不明' : value.toLocaleString('ja-JP', { hour12: false });
+  };
+  const clock = time => {
+    const value = new Date(time);
+    return Number.isNaN(value.getTime()) ? '—' : value.toLocaleTimeString('ja-JP', { hour12: false });
+  };
+  function route(code) {
+    const point = countries.get(code)?.point;
+    if (!point) return null;
+    const home = map.home;
+    if (code === 'JP') return `M ${home[0]} ${home[1]} c -24 -26 24 -26 0 0`;
+    return `M ${point[0]} ${point[1]} Q ${(point[0] + home[0]) / 2} ${Math.max(10, Math.min(point[1], home[1]) - Math.min(75, Math.abs(point[0] - home[0]) * .25) - 14)} ${home[0]} ${home[1]}`;
+  }
+  function cancelAnimations() {
+    animations.forEach(id => cancelAnimationFrame(id)); animations = [];
+    document.querySelectorAll('.packet').forEach(node => node.remove());
+  }
+  function pulse(code) {
+    if (!state.active || document.hidden || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const d = route(code); if (!d) return;
+    const path = svg('path', { d, class: 'transient-route', visibility: 'hidden' });
+    const point = svg('circle', { r: 3, class: 'packet' });
+    q('#routes').append(path); q('#points').append(point);
+    const length = path.getTotalLength(), start = performance.now();
+    function step(now) {
+      const t = Math.min(1, (now - start) / 1500), at = path.getPointAtLength(t * length);
+      point.setAttribute('cx', at.x); point.setAttribute('cy', at.y);
+      if (t < 1 && state.active) animations.push(requestAnimationFrame(step));
+      else { path.remove(); point.remove(); }
+    }
+    animations.push(requestAnimationFrame(step));
+  }
+  function drawMap() {
+    cancelAnimations(); q('#routes').replaceChildren(); q('#points').replaceChildren();
+    const event = state.events.find(item => item.id === selected);
+    const recentCodes = [...new Set(state.events.filter(item => !item.test).map(item => item.countryCode))].slice(0, 12);
+    for (const code of recentCodes) {
+      const d = route(code); if (d && code !== event?.countryCode) q('#routes').append(svg('path', { d, class: 'context-route' }));
+    }
+    const d = event && route(event.countryCode);
+    if (d) {
+      q('#routes').append(svg('path', { d, class: 'route', 'data-selected': event.id }));
+      const point = countries.get(event.countryCode).point;
+      q('#points').append(svg('circle', { cx: point[0], cy: point[1], r: 4, class: 'origin' }));
+    }
+    q('#points').append(svg('circle', { cx: map.home[0], cy: map.home[1], r: 5, class: 'home' }));
+    document.querySelectorAll('#land path').forEach(node => node.classList.toggle('selected-country', node.dataset.country === event?.countryCode));
+    const missing = state.events.filter(item => !countries.get(item.countryCode)).length;
+    q('#map-note').textContent = event && !d ? 'このアクセスは地図位置なし · 一覧に保持' : `国単位の推定 · 地図位置なし ${missing} 件`;
+    placeLabel();
+  }
+  function details() {
+    const event = state.events.find(item => item.id === selected);
+    q('#country').textContent = event?.country || 'アクセスを選択';
+    q('#ip').textContent = event?.ip || '—';
+    q('#time').textContent = event ? date(event.time) : '—';
+    q('#request').textContent = event ? `${event.method} ${event.path}` : '—';
+    q('#response').textContent = event ? `${event.status} · 模擬サービスの応答${event.test ? '（確認用）' : ''}` : '—';
+    q('#location').textContent = !event ? '—' : !event.countryCode ? '位置不明（未取得・予約IP・DB未収録）' :
+      countries.has(event.countryCode) ? `${event.country} · 国単位の推定` : `${event.country} · 地図の代表位置なし`;
+  }
+  function renderEvents() {
+    const list = q('#events'), scroll = list.scrollTop;
+    const focusedID = document.activeElement?.closest?.('.event')?.dataset.id;
+    list.replaceChildren();
+    for (const event of state.events) {
+      const li = document.createElement('li'), button = document.createElement('button');
+      button.className = 'event'; button.dataset.id = event.id; button.dataset.test = String(event.test);
+      button.setAttribute('aria-pressed', String(event.id === selected));
+      button.setAttribute('aria-label', `${event.country} ${event.method} ${event.path} ${event.test ? '確認用' : ''}`);
+      for (const [className, text] of [['country', event.country], ['time', clock(event.time)], ['path', `${event.method} ${event.path}`], ['code', String(event.status)]]) {
+        const span = document.createElement('span'); span.className = className; span.textContent = text;
+        if (className === 'country' && event.test) {
+          const badge = document.createElement('span'); badge.className = 'test'; badge.textContent = '確認用'; span.append(badge);
+        }
+        button.append(span);
+      }
+      button.onclick = () => {
+        selected = event.id; followNewest = event.id === state.events[0]?.id;
+        list.querySelectorAll('button').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.id === selected)));
+        details(); drawMap(); pulse(event.countryCode);
+      };
+      li.append(button); list.append(li);
+    }
+    list.scrollTop = followNewest ? 0 : scroll;
+    if (focusedID) [...list.querySelectorAll('button')].find(node => node.dataset.id === focusedID)?.focus({ preventScroll: true });
+    q('#empty').hidden = state.events.length > 0;
+    q('#empty').textContent = state.active ? '受信を待っています。ローカル検証では外部へ公開されません。' : '一時公開を開始すると、ここに受信したアクセスが表示されます。';
+    q('#retained').textContent = `${state.events.length} / 128 件`;
+  }
+  function placeLabel() {
+    const canvas = q('.map'), matrix = canvas.getScreenCTM(); if (!matrix) return;
+    const point = canvas.createSVGPoint(); point.x = map.home[0]; point.y = map.home[1];
+    const screen = point.matrixTransform(matrix), bounds = q('.map-wrap').getBoundingClientRect();
+    q('#home-label').style.left = `${screen.x - bounds.left}px`;
+    q('#home-label').style.top = `${screen.y - bounds.top + 13}px`;
+  }
+  window.honeyobs = {
+    update(next) {
+      const reset = state.session !== next.session;
+      if (reset) { selected = null; followNewest = true; seen = new Set(); currentSignature = ''; totalSeen = null; }
+      const fresh = next.events.filter(event => !seen.has(event.id));
+      state = next;
+      const ids = new Set(next.events.map(event => event.id));
+      if (followNewest || !ids.has(selected)) selected = next.events[0]?.id ?? null;
+      seen = ids;
+      document.body.dataset.active = String(next.active); document.body.dataset.error = String(next.phase === 'エラー');
+      q('#phase').textContent = !next.active && !next.canStart && next.phase !== 'エラー' ? '停止処理中' : next.phase;
+      q('#url').textContent = next.active && next.url ? next.url : '公開URLなし';
+      q('#engine-detail').textContent = next.detail;
+      q('#toggle').textContent = next.active ? '停止' : '一時公開を開始';
+      q('#toggle').disabled = !next.active && !next.canStart; q('#local').disabled = !next.canStart;
+      q('#copy').hidden = !(next.active && next.url);
+      q('#count').textContent = next.total;
+      q('#vm-status').textContent = next.active ? '内蔵VM：動作中 · 受信確認 約1秒ごと' : '内蔵VM：停止中';
+      q('#geo-status').textContent = next.geoAvailable ? next.geoEdition : 'GeoIPを読み込めません（位置不明として表示）';
+      const signature = JSON.stringify([next.session, next.active, next.events]);
+      if (signature !== currentSignature) {
+        currentSignature = signature; renderEvents(); details(); drawMap();
+        fresh.filter(event => !event.test).slice(0, 8).forEach(event => pulse(event.countryCode));
+      }
+      if (totalSeen !== next.total) q('#announcement').textContent = `受信 ${next.total} 件`;
+      totalSeen = next.total;
+    }
+  };
+  new ResizeObserver(placeLabel).observe(q('.map'));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) cancelAnimations(); });
+  drawMap(); action('ready');
+})();

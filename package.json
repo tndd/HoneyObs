@@ -1,0 +1,6 @@
+{
+  "name": "honeyobs-ui-checks",
+  "private": true,
+  "scripts": { "test": "node tests/dashboard.cjs" },
+  "devDependencies": { "playwright": "1.62.1" }
+}
