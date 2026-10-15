@@ -1,0 +1,45 @@
+const assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs');
+const {chromium}=require('playwright');
+(async()=>{
+ const out=path.join(__dirname,'../test-results/live-dashboard');fs.mkdirSync(out,{recursive:true});
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage({viewport:{width:1120,height:900}});const errors=[],requests=[];
+  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url())});
+  await page.addInitScript(()=>{window.actions=[];window.webkit={messageHandlers:{honeyobs:{postMessage:m=>actions.push(m.action)}}}});
+  await page.goto('file://'+path.join(__dirname,'../Resources/Dashboard/index.html'));
+  const base={session:'actual-live-ui-test',active:true,canStart:false,shutdownComplete:false,phase:'ローカル準備完了',url:'',detail:'外部公開なし',total:0,events:[],geoAvailable:true,geoEdition:'試験',observation:{rejections:{}},exercise:{sequence:1,scenario:'Hostの偽装',stage:'送信準備'}};
+  await page.evaluate(s=>honeyobs.update(s),base);
+  assert(await page.locator('#local').isHidden());assert(await page.locator('#copy').isHidden());assert(await page.locator('#shield').isHidden());
+  const event={id:'1',time:'2026-10-15T14:00:00Z',method:'GET',path:'/qa-wrong-host',ip:'',status:403,test:false,countryCode:'',country:'ローカル試験'};
+  const seen={...base,total:1,events:[event],exercise:{...base.exercise,stage:'応答受信',response:'HTTP 403',record:'未確認'}};
+  await page.evaluate(s=>honeyobs.update(s),seen);
+  assert.equal(await page.locator('#shield-title').textContent(),'HTTP 403 · 拒否');
+  assert.equal(await page.locator('#exercise-record').textContent(),'未確認');
+  const map=await page.locator('.map-wrap').boundingBox(),shield=await page.locator('#shield').boundingBox();
+  assert(shield.width<=220 && shield.x+shield.width>map.x+map.width-25 && shield.y>map.y+map.height/2);
+  assert.equal(await page.locator('#shield').evaluate(e=>getComputedStyle(e).pointerEvents),'none');
+  await page.screenshot({path:path.join(out,'response-before-log.png'),fullPage:true});
+  const logged={...seen,exercise:{...seen.exercise,stage:'記録確認',record:'イベント 1件を保存'}};
+  await page.evaluate(s=>honeyobs.update(s),logged);await page.locator('.event').click();
+  assert.equal(await page.locator('.route').count(),0);
+  const rejected={...logged,observation:{rejections:{http_400:{count:1}}},exercise:{sequence:2,scenario:'Content-Lengthの矛盾',stage:'記録確認',response:'HTTP 400',record:'拒否集計 +1件'}};
+  await page.evaluate(s=>honeyobs.update(s),rejected);
+  assert.equal(await page.locator('#shield-title').textContent(),'拒否を記録');
+  assert((await page.locator('#shield-note').textContent()).includes('HTTP拒否400 +1件'));
+  await page.setViewportSize({width:860,height:650});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.screenshot({path:path.join(out,'compact-shield.png'),fullPage:true});
+  await page.emulateMedia({reducedMotion:'reduce'});
+  await page.evaluate(s=>honeyobs.update(s),{...rejected,observation:{rejections:{http_400:{count:2}}}});
+  assert.equal(await page.locator('#shield').evaluate(e=>getComputedStyle(e).animationName),'none');
+  await page.getByRole('button',{name:'自己ペネを中止',exact:true}).click();assert((await page.evaluate(()=>actions)).includes('stop'));
+  await page.evaluate(s=>honeyobs.update(s),{...rejected,active:false,shutdownComplete:true,canStart:true,phase:'停止完了',exercise:{...rejected.exercise,finished:true}});
+  assert(await page.locator('#toggle').isDisabled());assert(await page.locator('#local').isHidden());
+  // 404は防御成功に置き換えず、観測できた応答だけを表示する。
+  await page.evaluate(s=>honeyobs.update(s),{...base,total:2,events:[{...event,id:'2',status:404}]});
+  assert.equal(await page.locator('#shield-title').textContent(),'HTTP 404 · 受信');
+  assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
+  console.log('右下シールド・応答と記録の分離・中止・縮小画面・動き軽減・外部通信なし: PASS');
+ } finally {await browser.close()}
+})().catch(e=>{console.error(e);process.exitCode=1});

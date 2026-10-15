@@ -11,3 +11,20 @@
 /* 観測の欠落と入力省略を、攻撃文字列をHTML化せず表示する。 */
 .observation-note { color: var(--muted, #9bb8c7); font-size: 12px; line-height: 1.6; padding: 0 22px; overflow-wrap: anywhere; }
 #path-note { overflow-wrap: anywhere; }
+
+/* 実測の通知は右下へ小さく置き、地図や操作を覆わない。 */
+.exercise-panel { padding: 13px 22px; border-bottom: 1px solid var(--line); background: var(--chrome); display: grid; grid-template-columns: 1.4fr .8fr 1fr; gap: 18px; }
+.exercise-panel[hidden], .shield[hidden] { display: none; }
+.exercise-panel strong { display: block; font-size: 13px; font-weight: 500; margin: 5px 0; overflow-wrap: anywhere; }
+.exercise-label, #exercise-stage { color: var(--sub); font-size: 11px; }
+.map-wrap { position: relative; }
+.shield { position: absolute; right: 16px; bottom: 46px; width: 216px; max-width: 45%; padding: 11px 13px; border: 1px solid #3b7181; border-radius: 8px; background: #0d2631f0; color: var(--ink); pointer-events: none; z-index: 2; }
+.shield-label { color: var(--sub); font-size: 10px; display: flex; align-items: center; gap: 6px; }
+.shield-label svg { width: 18px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.shield strong { display: block; font-size: 14px; font-weight: 550; margin: 5px 0; }
+#shield-note { display: block; color: var(--sub); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.shield[data-kind=reject] { border-color: #a5814e; }
+.shield[data-kind=reject] strong { color: #efc586; }
+.shield.pulse { animation: shield-notice 900ms ease-out; }
+@keyframes shield-notice { from { box-shadow: 0 0 0 3px #6be0e422; transform: translateY(3px); } to { box-shadow: 0 0 0 0 #6be0e400; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .shield.pulse { animation: none; } }

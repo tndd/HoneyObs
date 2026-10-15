@@ -16,11 +16,17 @@
       <div class="connection"><div class="status" role="status"><span class="dot"></span><span id="phase">読み込み中</span></div><div id="url" class="url">公開URLなし</div><div id="engine-detail" class="muted"></div></div>
       <div class="actions"><button id="copy" hidden>URLをコピー</button><button id="local" disabled>ローカル検証</button><button id="toggle" class="primary" disabled>一時公開を開始</button></div>
     </section>
+    <section id="exercise-panel" class="exercise-panel" aria-label="localhost自己ペネの進行" hidden>
+      <div><span class="exercise-label">localhost自己ペネ · 実行中の観測</span><strong id="exercise-scenario">準備中</strong><span id="exercise-stage">待機</span></div>
+      <div><span class="exercise-label">攻撃への応答</span><strong id="exercise-response">未受信</strong></div>
+      <div><span class="exercise-label">ログとの照合</span><strong id="exercise-record">未確認</strong></div>
+    </section>
     <div class="body">
       <section class="map-wrap" aria-label="日本中心のアクセス地図">
         <div class="map-heading"><h1>世界のアクセス <span>日本中心</span></h1><div class="muted">受信 <b id="count">0</b> 件</div></div>
         <svg class="map" viewBox="0 0 800 370" role="img" aria-label="受信したアクセスの国別推定位置と日本の表示上の観測点"><path id="graticule"/><g id="land"></g><g id="routes"></g><g id="points"></g></svg>
         <span id="home-label">日本 · 表示上の観測点</span>
+        <aside id="shield" class="shield" aria-label="最新の観測結果" hidden><span class="shield-label"><svg viewBox="0 0 24 26" aria-hidden="true"><path d="M12 2 22 6v7c0 6-6 10-10 12C8 23 2 19 2 13V6Z"/><path d="m7 13 3 3 7-7"/></svg>最新の観測</span><strong id="shield-title">受信待ち</strong><span id="shield-note"></span></aside>
         <div class="map-note"><span class="legend">受信経路</span><span id="map-note">受信を待っています</span></div>
       </section>
       <section class="stream" aria-label="最近のアクセス">

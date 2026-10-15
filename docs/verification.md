@@ -144,3 +144,21 @@ AppKitの終了待ちを初めにterminateLaterで実装したところ、実ア
 - `python3 tests/integration.py --local`：ローカルVM隔離回帰に合格。`test-results/verification-20261015-222247/report.json`。
 
 初回自己ペネの記録 `test-results/self-pentest-20261015-01/` と比較しています。今回の試験は外部経路を含まず、Cloudflareによる拒否・ヘッダー上書きは未検証です。GUIは実ログのPlaywright描画で、ネイティブWebKitの全操作を再試験したものではありません。アプリ内組み込みブラウザは使用していません。永続的な監査ログ、全攻撃への耐性、停止直前にVMに残る未取得記録の回収は保証対象外です。
+
+
+## 自己ペネの実GUI表示と右下シールド（2026-10-15、#15）
+
+`python3 tests/self_pentest.py --gui` で、実VMへの試験と製品Dashboardを同時に動かします。試験用Engineは従来と同じ起動2箇所の置換だけで、HTTP処理・中継・観測処理は変更していません。進行ファイルには試験名・HTTP結果・記録数だけを渡し、応答受信と記録確認を別の段階で表示します。GUIの受信件数と実ログ、HTTP 403通知とHTTP解析前拒否通知も照合します。
+
+シールドは地図右下に幅216pxで置き、短い900msの通知動作だけを行います。操作を遮らず、動きを減らす設定に従います。受信・認証失敗・拒否を実測に応じて区別し、404を防御成功と解釈しません。localhost試験ではIPヘッダー偽装を地理情報に変換しません。
+
+検証結果：
+
+- `bash scripts/build.sh`：署名を含めビルド成功。
+- `npm test`、`node tests/live_dashboard.cjs`：従来の画面に加え、応答と記録の分離、右下の配置、行選択、中止、停止後の再公開禁止、860px表示、動き軽減、外部通信なしを確認。Playwrightの画像を目視確認。
+- `python3 tests/self_pentest.py --gui --close-after`：20ケース・160件の連続送信・接続数制限・回復・停止が合格。実WKWebViewで22回の進行照合が合格し、ネイティブ画像のHTTP 403とログ表示を目視確認。記録：`test-results/self-pentest-20261015-230529-f11289/report.json`。
+- `python3 tests/live_pentest_cancel.py`：試験の最初のケース中に実WKWebViewの中止ボタン処理を呼び、試験側中断・Runner終了・VMなし・停止確認済み・localhost入口閉鎖を確認。記録：`test-results/self-pentest-20261015-231031-7f74d3/report.json`。
+
+ネイティブ操作はWKWebView内のボタン処理を呼ぶ方式で、クリック自体は別途Playwrightで確認しています。アプリ内組み込みブラウザは使用していません。外部トンネル経路は今回の対象外です。ゲストや停止本体に変更がないため、全隔離プローブや停止API故障注入の全体再実行は省略し、この変更に関係する実VM自己ペネとGUI中止を検証しました。全攻撃への耐性や、停止直前にVMに残った未取得記録の回収を保証するものではありません。
+
+最終の画面を残す実演：`test-results/self-pentest-20261015-231357-af7f66/report.json`。同じ全ケースと22回のGUI照合を再確認し、停止済みの結果画面だけを保持します。完了後は進行監視タイマーを停止するため、画面を残しても検証状態の定期書き込みは継続しません。試験Runnerを独立したセッションで起動し、呼び出し元の終了後にも結果を閲覧できるようにしています。
