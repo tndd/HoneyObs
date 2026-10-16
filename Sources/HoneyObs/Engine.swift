@@ -217,7 +217,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 case .failure(let error): self.fail(error.localizedDescription)
                 case .success:
                     self.phase = "VM準備中"; self.update()
-                    self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+                    let health = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+                    self.timer = health; RunLoop.main.add(health, forMode: .common)
                     self.tick()
                 }
             }
@@ -291,7 +292,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         let permission = ForwardingPermit(confirmedAt: confirmed)
         guard permission.valid else { fail("画面またはVMの応答が古いため転送を開始しません"); return }
         permit = permission
-        permitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.maintainPermit() }
+        let renewal = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.maintainPermit() }
+        permitTimer = renewal; RunLoop.main.add(renewal, forMode: .common)
         do {
             let parameters = NWParameters.tcp
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -403,7 +405,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         for client in pending.values { cancelClient(client) }
         for relay in sessions.values { relay.cancel() }
         for read in guestReads.values { read.cancel() }
-        stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        let stoppingTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        stopTimer = stoppingTimer; RunLoop.main.add(stoppingTimer, forMode: .common)
         update(); advanceStop()
     }
 

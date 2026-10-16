@@ -35,7 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if headless { engine.start(publish: CommandLine.arguments.contains("--public"), localExercise: options.testing && CommandLine.arguments.contains("--local-origin")); onReady?() }
         else { createWindow() }
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        let status = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        statusTimer = status; RunLoop.main.add(status, forMode: .common)
     }
 
     private func createWindow() {

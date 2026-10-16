@@ -411,7 +411,9 @@ final class SessionClient {
         try SessionOwnership.save(["label": String(service.split(separator: "/").last!), "ownerService": monitorService, "clientService": service,
             "ownerPID": launcher, "ownerBirth": monitorBirth, "clientPID": getpid(), "clientBirth": SessionOwnership.birth(getpid()) ?? "",
             "ownerPGID": getpgid(launcher), "clientPGID": getpgrp(), "jobBodyIsVZOwner": true, "socketDirectory": temporary.path], directory.appendingPathComponent("owner.json"))
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }; tick()
+        // メニュー追跡では継続し、main自体が停止した場合は期限を失効させる。
+        let heartbeat = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
+        timer = heartbeat; RunLoop.main.add(heartbeat, forMode: .common); tick()
     }
     deinit { timer?.invalidate(); close(fd) }
     func markUIReady() {

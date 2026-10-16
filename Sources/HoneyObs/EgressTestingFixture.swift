@@ -23,7 +23,8 @@ final class EgressTestingFixture {
             connection.start(queue:.main);self.readHello(connection,bytes:Data())
         }
         listener.start(queue:.main)
-        timer=Timer.scheduledTimer(withTimeInterval:0.2,repeats:true){[weak self]_ in guard let self else{return};_=self.permit.renew(confirmedAt:safetyTime())}
+        let renewal=Timer(timeInterval:0.2,repeats:true){[weak self]_ in guard let self else{return};_=self.permit.renew(confirmedAt:safetyTime())}
+        timer=renewal;RunLoop.main.add(renewal,forMode:.common)
     }
     private func readHello(_ connection:NWConnection,bytes:Data){
         connection.receive(minimumIncompleteLength:1,maximumLength:16384){[weak self]data,_,done,error in
