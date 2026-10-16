@@ -6,6 +6,9 @@ mkdir -p test-results/unit-bin
 swiftc -swift-version 5 Sources/HoneyObs/{GeoIP,ObservedEvent,ObservationStore}.swift \
   tests/ObservationChecks.swift -o test-results/unit-bin/observations
 test-results/unit-bin/observations
+swiftc -swift-version 5 Sources/HoneyObs/{GeoIP,ObservedEvent,ObservationStore,ObservationDrain}.swift \
+  tests/ObservationDrainChecks.swift -o test-results/unit-bin/observation-drain
+test-results/unit-bin/observation-drain
 # 許可の製品実装を直接リンクする。Virtualization.frameworkへリンクするがVMは生成しない。
 swiftc -swift-version 5 -framework Network -framework Virtualization \
   Sources/HoneyObs/Relay.swift tests/PermitChecks.swift -o test-results/unit-bin/permit
