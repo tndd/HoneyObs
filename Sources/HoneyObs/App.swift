@@ -107,6 +107,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "restore": window?.deminiaturize(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
                 case "hide": NSApp.hide(nil)
                 case "show": NSApp.unhide(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
+                case "track-menu":
+                    if dashboardSmoke {
+                        // status TimerとGCD main blockの両方を抜け、通常のAppKit追跡と同じ再入条件にする。
+                        DispatchQueue.main.async { [weak self] in
+                            RunLoop.main.perform(inModes:[.default]) { [weak self] in self?.trackMenuForTesting() }
+                        }
+                    }
                 case "stop":
                     if dashboardSmoke { dashboard?.testAction("stop") }
                     else { engine.stop(reason:"検証からの停止") }
@@ -136,6 +143,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.dashboard?.capture(to: self.engine.directory.appendingPathComponent("ui-public.png")) { NSApp.terminate(nil) }
             }
         }
+    }
+
+    private func trackMenuForTesting() {
+        guard options.testing, dashboardSmoke, let view = window?.contentView else { return }
+        let menu = NSMenu(title:"HoneyObs QA")
+        menu.autoenablesItems = false
+        menu.addItem(withTitle:"検証中（4.2秒後に閉じます）",action:nil,keyEquivalent:"")
+        let started = safetyTime()
+        var samples:[[String:Any]] = [], cancelledByTimer = false
+        let sample = Timer(timeInterval:0.2,repeats:true) { [weak self] _ in
+            guard let self else { return }
+            var value = self.engine.testingSnapshot
+            value["mode"] = RunLoop.main.currentMode?.rawValue ?? ""
+            value["elapsed"] = safetyTime()-started
+            value["active"] = self.engine.isActive
+            samples.append(value)
+            self.engine.save(["finished":false,"pid":getpid(),"samples":samples],name:"menu-tracking.json")
+        }
+        let end = Timer(timeInterval:4.2,repeats:false) { _ in cancelledByTimer = true; menu.cancelTracking() }
+        RunLoop.main.add(sample,forMode:.common); RunLoop.main.add(end,forMode:.common)
+        let shown = menu.popUp(positioning:nil,at:NSPoint(x:80,y:view.bounds.height-70),in:view)
+        sample.invalidate(); end.invalidate()
+        engine.save(["finished":true,"pid":getpid(),"duration":safetyTime()-started,
+                     "popupReturnValue":shown,"cancelledByTimer":cancelledByTimer,"samples":samples],name:"menu-tracking.json")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

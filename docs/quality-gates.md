@@ -56,4 +56,6 @@ CI定義の追加とGitHub上の実行成功は別です。ローカル検証、
 
 `tests/app_background.py` は通常GUIの自ウィンドウだけを最小化・非表示にします。追加のJSによる状態注入をせず、ネイティブのfreshness、HTTP応答、OSが持つUUID付きVM helperを突き合わせます。他アプリ・画面ロック・実スリープを操作しません。
 
+`tests/menu_integration.py` は私有コピーの実WKWebView・観測VMでNSMenuを4.2秒保持し、実tracking mode内でUI/guest時刻と有効permitが進み、既存の所有PID/誕生identity・両jobを維持したまま追跡中と終了後のlocalhost HTTPが応答することを確認します。メニュー開始は元TimerとGCD main blockを抜けてから行い、終了後は実VM helperと所有processの消滅・QA登録解除を成功記録の前に確認します。
+
 新しい最終観測・保存排他・ログ上限の検査は `tests/unit.sh`、URLの分割とログ回転は `tests/console_capture.sh` に含めます。一般配布の署名ゲートは `python3 scripts/check_bundle.py --distribution` で明示し、Developer IDを用意できない現在の環境ではBLOCKEDとします。
