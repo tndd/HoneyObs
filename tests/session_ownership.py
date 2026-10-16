@@ -112,7 +112,7 @@ for fault in faults:
     wrapper = subprocess.Popen(launch,
                                stdout=(run / 'launcher.log').open('w'), stderr=subprocess.STDOUT)
     owner = {}; witness = []; timeline = {}; resource_elapsed = None; start = None
-    stop_observer = threading.Event(); observer = None
+    stop_observer = threading.Event(); observer = None; late = {}; late_observer = None
     try:
         owner = wait(lambda: read(run / 'owner.json'), 15)
         client, monitor = owner['clientPID'], owner['ownerPID']
@@ -171,6 +171,22 @@ for fault in faults:
             current = command('/bin/ps', '-p', str(monitor), '-o', 'command=').stdout.strip()
             assert str(APP / 'Contents/Helpers/HoneyObsSession') in current and '--monitor-job' in current, current
             os.kill(monitor, signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
+        if '-helper-' in fault:
+            def probe_after_expiry():
+                time.sleep(max(0, 3.25 - (time.monotonic() - start)))
+                late['attemptedAt'] = round(time.monotonic() - start, 3)
+                try:
+                    with socket.create_connection(('127.0.0.1', port), .5) as probe:
+                        probe.settimeout(2)
+                        probe.sendall(f'GET /qa-helper-after-expiry HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n'.encode())
+                        try:
+                            response = probe.recv(100)
+                        except (ConnectionResetError, TimeoutError):
+                            response = b''
+                        late['denied'] = response == b''
+                except OSError:
+                    late['denied'] = True
+            late_observer = threading.Thread(target=probe_after_expiry, daemon=True); late_observer.start()
         cutoff = None
         if held:
             held.settimeout(6)
@@ -215,9 +231,13 @@ for fault in faults:
         assert all(not alive(entry['pid']) for entry in witness)
         socket_directory = owner.get('socketDirectory')
         assert socket_directory and not pathlib.Path(socket_directory).exists(), '故障後も管理socketが残っています'
+        all_gone_elapsed = time.monotonic() - start
+        if late_observer:
+            late_observer.join(timeout=6)
+            assert not late_observer.is_alive() and late.get('denied') and late['attemptedAt'] >= 3.2, late
         REPORT['cases'][fault] = {'existingSocketClosedWithin': round(cutoff, 3) if cutoff is not None else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3),
-                                  'allRecoveredWithin': round(time.monotonic() - start, 3), 'bothJobsRemoved': True,
+                                  'allRecoveredWithin': round(all_gone_elapsed, 3), 'bothJobsRemoved': True, 'newAfterExpiry': late,
                                   'stopRequestedWithin': timeline.get('stopRequestedWithin'),
                                   'recoveredAfterStopRequest': round(resource_elapsed - timeline['stopRequestedWithin'], 3) if 'stopRequestedWithin' in timeline else None,
                                   'cooperativeHelperStop': cooperative_helper_stop,
