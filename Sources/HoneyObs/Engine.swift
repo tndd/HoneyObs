@@ -18,6 +18,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var supervisor: Process?
     private var timer: Timer?
     private var wantsPublic = false
+    private var localExercise = false
     private var active = false
     private var polling = false
     private var generation = UUID()
@@ -85,8 +86,13 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         onChange?()
     }
 
-    func start(publish: Bool) {
+    var exerciseEndpoint: (port: UInt16, host: String)? {
+        active && localExercise && localPort != 0 ? (localPort, originHost) : nil
+    }
+
+    func start(publish: Bool, localExercise: Bool = false) {
         guard canStart else { return }
+        self.localExercise = localExercise
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
         runError = nil; lastGuestReply = ProcessInfo.processInfo.systemUptime
         generation = UUID(); let current = generation
@@ -173,7 +179,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             if !self.tunnelStarted {
                 self.tunnelStarted = true
-                if self.wantsPublic { self.startOrigin() } else { self.phase = "ローカル準備完了"; self.update() }
+                if self.wantsPublic || self.localExercise { self.startOrigin() } else { self.phase = "ローカル準備完了"; self.update() }
             }
             if !self.diagnosticsStarted {
                 self.diagnosticsStarted = true
@@ -202,7 +208,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 guard self.active, self.generation == current else { return }
                 switch state {
                 case .ready:
-                    if let port = server?.port { self.localPort = port.rawValue; self.startTunnel() }
+                    if let port = server?.port { self.localPort = port.rawValue; self.originReady() }
                 case .failed(let error): self.fail(error.localizedDescription)
                 default: break
                 }
@@ -237,6 +243,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             server.start(queue: .main)
         } catch { fail(error.localizedDescription) }
+    }
+
+    private func originReady() {
+        if localExercise { phase = "ローカル準備完了"; update() }
+        else { startTunnel() }
     }
 
     private func startTunnel() {

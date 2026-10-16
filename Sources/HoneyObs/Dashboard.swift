@@ -12,6 +12,7 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     var onReady: (() -> Void)?
     var exercise: [String: Any]?
     var onExerciseStop: (() -> Void)?
+    var onExerciseStart: (() -> Void)?
 
     init(engine: Engine) {
         self.engine = engine
@@ -35,11 +36,14 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         // 自己ペネ画面から公開・再起動を指示できないよう、ネイティブ側でも制限する。
         if exercise != nil, action != "ready" {
             if action == "stop" { onExerciseStop?() }
+            if action == "start-exercise", engine.canStart { onExerciseStart?() }
+            if action == "dismiss-exercise", engine.canStart { exercise = nil; refresh() }
             return
         }
         switch action {
         case "ready": ready = true; refresh(); onReady?()
         case "start-local": engine.start(publish: false)
+        case "start-exercise": if engine.canStart { onExerciseStart?() }
         case "start-public": engine.start(publish: true)
         case "stop": engine.stop(reason: "停止ボタン")
         case "copy-url":
@@ -101,6 +105,7 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     func testAction(_ action: String) {
         let scripts = ["public": "document.querySelector('#toggle').click()",
                        "local": "document.querySelector('#local').click()",
+                       "exercise": "document.querySelector('#exercise').click()",
                        "stop": "document.querySelector('#toggle').click()",
                        "first": "document.querySelector('.event')?.click()",
                        "last": "document.querySelector('#events li:last-child .event')?.click()"]

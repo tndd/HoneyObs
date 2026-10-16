@@ -43,11 +43,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let headless: Bool
     private var window: NSWindow?
     private var dashboard: Dashboard?
+    private var exercise: LocalPentest?
     private var sources: [DispatchSourceSignal] = []
     private var statusTimer: Timer?
     private let uiSmoke: Bool
     private let uiPublicSmoke: Bool
-    private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke")
+    private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke") || CommandLine.arguments.contains("--ui-exercise-smoke")
     private var smokeStage = 0
     private var terminationPending = false
 
@@ -84,10 +85,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentMinSize = NSSize(width: 860, height: 650)
         window.backgroundColor = NSColor(calibratedRed: 0.047, green: 0.094, blue: 0.137, alpha: 1)
         let dashboard = Dashboard(engine: engine)
+        let exercise = LocalPentest(engine: engine, dashboard: dashboard)
+        self.exercise = exercise
+        dashboard.onExerciseStart = { [weak exercise] in exercise?.start() }
+        dashboard.onExerciseStop = { [weak exercise] in exercise?.cancel() }
         dashboard.onReady = { [weak self] in
             guard let self else { return }
             if self.uiSmoke { self.dashboard?.testAction("local") }
             if self.uiPublicSmoke { self.dashboard?.testAction("public") }
+            if CommandLine.arguments.contains("--ui-exercise-smoke") { self.dashboard?.testAction("exercise") }
         }
         window.contentView = dashboard.webView
         self.dashboard = dashboard; self.window = window

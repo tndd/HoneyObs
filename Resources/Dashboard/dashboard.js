@@ -20,6 +20,8 @@
     window.webkit?.messageHandlers.honeyobs.postMessage({ action: name });
   }
   q('#local').onclick = () => action('start-local');
+  q('#exercise').onclick = () => action('start-exercise');
+  q('#exercise-back').onclick = () => action('dismiss-exercise');
   q('#toggle').onclick = () => action(state.active ? 'stop' : 'start-public');
   q('#copy').onclick = () => action('copy-url');
   const date = time => {
@@ -142,6 +144,10 @@
       q('#copy').hidden = !(next.active && next.url);
       q('#exercise-panel').hidden = !next.exercise;
       q('#local').hidden = Boolean(next.exercise);
+      q('#exercise').hidden = Boolean(next.exercise && !next.exercise.finished);
+      q('#exercise').disabled = !next.canStart;
+      q('#exercise-back').hidden = !next.exercise?.finished;
+      q('#exercise-back').disabled = !next.canStart;
       if (next.exercise) {
         const exercise = next.exercise;
         q('#exercise-panel').dataset.sequence = String(exercise.sequence ?? 0);
@@ -149,7 +155,7 @@
         q('#exercise-stage').textContent = exercise.stage ?? '待機';
         q('#exercise-response').textContent = exercise.response ?? '未受信';
         q('#exercise-record').textContent = exercise.record ?? '未確認';
-        q('#toggle').textContent = '自己ペネを中止';
+        q('#toggle').textContent = exercise.finished ? '自己ペネ終了' : '自己ペネを中止';
         q('#toggle').disabled = !next.active || Boolean(exercise.finished);
         q('#copy').hidden = true;
       }
