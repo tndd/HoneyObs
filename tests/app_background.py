@@ -4,6 +4,7 @@
 JSによる追加の状態取得、他アプリの操作、画面ロック、スリープ、公開は行わない。
 native background-state.jsonと実HTTP、OSのVZ helperを独立の観測に使う。
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -94,10 +95,15 @@ def fresh(run):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--case', choices=['all', 'minimize', 'hide'], default='all')
+    args = parser.parse_args()
     assert APP != (Path.home() / 'Applications/HoneyObs.app').resolve(), '検証は作業tree内のアプリを指定してください'
     assert EXE.is_file()
     OUT.mkdir(mode=0o700, parents=True)
     for action, restore, property_name in [('minimize', 'restore', 'windowMiniaturized'), ('hide', 'show', 'appHidden')]:
+        if args.case != 'all' and action != args.case:
+            continue
         run = OUT / action
         run.mkdir(mode=0o700)
         witness, held, owner = [], None, {}
