@@ -12,6 +12,7 @@ fi
 trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
 printf '%s\n' "$$" > "$lock/pid"
 bash scripts/build.sh
+python3 scripts/check_bundle.py
 python3 tests/integration.py --local
 bash tests/lifecycle.sh
 python3 tests/self_pentest.py

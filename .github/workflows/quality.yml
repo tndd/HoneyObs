@@ -54,9 +54,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: guest/go.mod
+          cache: false
       - run: bash tests/unit.sh
       - name: 製品Swiftの型検査
         run: swiftc -swift-version 5 -typecheck -framework Cocoa -framework Virtualization -framework Network -framework WebKit Sources/HoneyObs/*.swift
+      - name: 開発署名と同梱資産の検査
+        run: |
+          bash scripts/build.sh
+          python3 scripts/check_bundle.py
 
   local-vm:
     name: 実Macのlocalhost VMゲート

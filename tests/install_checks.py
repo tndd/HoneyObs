@@ -55,6 +55,13 @@ if [[ "${FIXTURE_FAIL:-}" == backup && "$1" == */previous.app && "$2" == */.Hone
   touch "$FIXTURE_MARK"; exit 1
 fi
 if [[ "${FIXTURE_FAIL:-}" == recovery && ( "$1" == */.HoneyObs-install.*/HoneyObs.app || "$1" == */previous.app ) ]]; then exit 1; fi
+if [[ ( "${FIXTURE_FAIL:-}" == signal-old && "$2" == */previous.app ) ||
+      ( "${FIXTURE_FAIL:-}" == signal-candidate && "$1" == */.HoneyObs-install.*/HoneyObs.app ) ||
+      ( "${FIXTURE_FAIL:-}" == signal-backup && "$1" == */previous.app && "$2" == */.HoneyObs-previous.app ) ]]; then
+  /bin/mv "$@" || exit 1
+  kill -TERM "$PPID"
+  exit 0
+fi
 exec /bin/mv "$@"
 ''')
         self.source = self.root / 'build/HoneyObs.app'
@@ -111,7 +118,7 @@ exec /bin/mv "$@"
         self.assertEqual(self.version(self.backup), 'new')
 
     def test_failures_restore_current_and_previous(self):
-        for failure in ['candidate', 'register', 'backup']:
+        for failure in ['candidate', 'register', 'backup', 'signal-old', 'signal-candidate', 'signal-backup']:
             with self.subTest(failure=failure):
                 self.make_app(self.target, 'old')
                 self.make_app(self.backup, 'older')
@@ -148,11 +155,30 @@ exec /bin/mv "$@"
             process.terminate()
             process.wait(timeout=5)
 
+    def test_running_backup_is_not_removed(self):
+        self.make_app(self.backup, 'old')
+        process = subprocess.Popen([str(self.backup / 'Contents/MacOS/HoneyObs')])
+        try:
+            self.install(succeeds=False)
+            self.assertEqual(self.version(self.backup), 'old')
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
     def test_symlink_is_not_followed(self):
         self.make_app(self.backup, 'old')
         self.target.symlink_to(self.backup)
         self.install(succeeds=False)
         self.assertEqual(self.version(self.backup), 'old')
+
+    def test_concurrent_installer_is_rejected(self):
+        self.make_app(self.target, 'old')
+        lock = self.destination / '.HoneyObs-install.lock'
+        lock.mkdir()
+        result = self.install(succeeds=False)
+        self.assertIn('別の導入処理', result.stderr)
+        self.assertEqual(self.version(self.target), 'old')
+        self.assertTrue(lock.exists())
 
 
 if __name__ == '__main__':
