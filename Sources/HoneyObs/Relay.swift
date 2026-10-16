@@ -41,6 +41,11 @@ final class Relay {
     private var permitTimer: DispatchSourceTimer?
     private let guestLock = NSLock()
     private var guestClosed = false
+    private var readerFinished = false
+    private var clientCancelled = false
+    private var completionSent = false
+    private var rejectionReason: String?
+    private let scheduleRead: (@escaping () -> Void) -> Void
     private func closeGuest() {
         guestLock.lock(); defer { guestLock.unlock() }
         if !guestClosed { guestClosed = true; guest.close() }
@@ -54,8 +59,9 @@ final class Relay {
     private let finished: () -> Void
     private let rejected: (String) -> Void
 
-    init(client: NWConnection, guest: VZVirtioSocketConnection, permit: ForwardingPermit? = nil, rejected: @escaping (String) -> Void = { _ in }, finished: @escaping () -> Void) {
-        self.client = client; self.guest = guest; self.permit = permit; self.finished = finished; self.rejected = rejected
+    init(client: NWConnection, guest: VZVirtioSocketConnection, permit: ForwardingPermit? = nil, rejected: @escaping (String) -> Void = { _ in },
+         scheduleRead: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.global().async(execute: DispatchWorkItem(block: $0)) }, finished: @escaping () -> Void) {
+        self.client = client; self.guest = guest; self.permit = permit; self.finished = finished; self.rejected = rejected; self.scheduleRead = scheduleRead
     }
 
     func start() {
@@ -76,10 +82,16 @@ final class Relay {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var noSig: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSig, socklen_t(MemoryLayout<Int32>.size))
+        client.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .cancelled = state {
+                self.clientCancelled = true; self.finish(reason: self.permitted ? nil : "permit_expired"); self.completeIfClosed()
+            }
+        }
         client.start(queue: queue)
         queue.async { self.receive() }
         queue.asyncAfter(deadline: .now() + 6) { self.finish(reason: "relay_timeout") }
-        DispatchQueue.global().async {
+        scheduleRead {
             var response = Data()
             var buf = [UInt8](repeating: 0, count: 4096)
             while response.count <= 65536 {
@@ -89,10 +101,12 @@ final class Relay {
             }
             let data = response
             self.queue.async {
-                if self.stopped || !self.permitted { self.closeGuest(); return }
-                if data.count > 65536 || data.isEmpty { self.finish(); self.closeGuest(); return }
+                self.readerFinished = true
+                if self.stopped { self.closeGuest(); self.completeIfClosed(); return }
+                if !self.permitted { self.finish(reason: "permit_expired"); return }
+                if data.count > 65536 || data.isEmpty { self.finish(); return }
                 self.client.send(content: data, completion: .contentProcessed { _ in
-                    self.finish(); self.closeGuest()
+                    self.finish()
                 })
             }
         }
@@ -121,10 +135,19 @@ final class Relay {
 
     private func finish(reason: String? = nil) {
         guard !stopped else { return }; stopped = true
+        rejectionReason = reason
         client.cancel()
         permitTimer?.cancel(); permitTimer = nil
         shutGuest()
-        DispatchQueue.main.async { if let reason { self.rejected(reason) }; self.finished() }
+        // 読取worker終了後、書込と同じ直列キューでFDを閉じる。
+        if readerFinished { closeGuest() }
+        completeIfClosed()
+    }
+
+    private func completeIfClosed() {
+        guard stopped, readerFinished, guestClosed, clientCancelled, !completionSent else { return }
+        completionSent = true
+        DispatchQueue.main.async { if let reason = self.rejectionReason { self.rejected(reason) }; self.finished() }
     }
 
     func cancel() { client.cancel(); shutGuest(); queue.async { self.finish() } }
