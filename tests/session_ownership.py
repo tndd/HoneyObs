@@ -204,14 +204,22 @@ for fault in faults:
             current = command('/bin/ps', '-p', str(monitor), '-o', 'command=').stdout.strip()
             assert str(APP / 'Contents/Helpers/HoneyObsSession') in current and '--monitor-job' in current, current
             os.kill(monitor, signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
-        if '-helper-' in fault:
+        if fault not in ['normal-stop', 'startup-stop']:
             def probe_after_expiry():
                 time.sleep(max(0, 3.25 - (time.monotonic() - start)))
+                # 既存POSTも期限後の新しいpayloadで完結を試みる。recv側はHTTP応答を一切許さない。
+                late['existingPayloadAttemptedAt'] = round(time.monotonic() - start, 3)
+                try:
+                    held.sendall(b'x' * 99)
+                    late['existingPayloadQueuedToKernel'] = True
+                except OSError:
+                    late['existingPayloadQueuedToKernel'] = False
+                nonce = os.urandom(16).hex(); late['nonce'] = nonce
                 late['attemptedAt'] = round(time.monotonic() - start, 3)
                 try:
                     with socket.create_connection(('127.0.0.1', port), .5) as probe:
                         probe.settimeout(2)
-                        probe.sendall(f'GET /qa-helper-after-expiry HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n'.encode())
+                        probe.sendall(f'GET /qa-session-after-expiry-{nonce} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n'.encode())
                         try:
                             response = probe.recv(100)
                         except (ConnectionResetError, TimeoutError):
@@ -270,6 +278,7 @@ for fault in faults:
         if late_observer:
             late_observer.join(timeout=6)
             assert not late_observer.is_alive() and late.get('denied') and late['attemptedAt'] >= 3.2, late
+            late['existingPayloadResponseDenied'] = True
         REPORT['cases'][fault] = {'existingSocketClosedWithin': round(cutoff, 3) if cutoff is not None else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3),
                                   'allRecoveredWithin': round(all_gone_elapsed, 3), 'bothJobsRemoved': True, 'newAfterExpiry': late,
