@@ -8,6 +8,22 @@
 
 ログイン時の常駐登録、KeepAlive、故障後の自動再公開は行わない。UIの再起動やスリープ復帰だけで公開を再開しない。停止結果が不確実なセッションは新規起動を拒否し、状態表示にも失敗を残す。保存済みPIDだけによるkillや、名前での全体掃除を所有の証明に使わない。
 
+```mermaid
+flowchart LR
+    OS[launchd] --> UI[UI・Engineジョブ]
+    OS --> Monitor[専用監視ジョブ]
+    UI <-->|認証socket・3秒期限| Monitor
+    UI --> Decoy[模擬VM・NICなし]
+    UI --> Comm[通信VM・NICなし]
+    Comm -->|用途別vsock| Gate[ホスト仲介・失効検査]
+    Gate -->|固定origin| Decoy
+    Gate -->|固定API・固定edge| CF[Cloudflare]
+```
+
+両ジョブの識別は起動ごとのUUIDで固定する。制御用launchctlも同じPGIDに継承し、64KiB・2秒に制限する。タイムアウトした未reapの自子だけを終了し、PID再利用を避ける。job不在の応答と制御コマンド失敗を区別する。試験モードのregistryは私有run-directory内に置き、並列試験の別セッションを回収しない。
+
+IPCの初回は接続元UID/PID・生成時刻とランダムtokenを照合する。その後の通常frameは16バイト（UInt64系列番号、UInt64の連続時計nanosecond絶対期限）。同一系列の再送、期限超過、受信時点から3.01秒を超える期限、発行していないackを拒否する。UI準備完了は系列0/値0、正常終了は系列0/値1を同じ認証済み接続で明示する。正常終了はEngineの回収確認・goodbye・実PID消滅を合わせて判定し、EOFや古いstate.jsonで成功へ変換しない。
+
 公開許可は最大3秒の一方向の失効状態を持つ。UI応答、模擬サービス応答、通信VMの正常性、所有監視の成立を更新条件とし、Relayは独立キューと各I/Oで失効を確認する。失効後の新規接続と既存接続を閉じる。通常OFFは許可取消と入口閉鎖を最初に行う。
 
 ## 回収完了の定義
@@ -16,11 +32,22 @@
 
 Engineの停止確認期限8秒は停止要求の起点であり、故障発生からOS/XPC全回収までの上限ではない。補助プロセスSIGSTOPの試験では新規転送は約2秒で遮断された一方、全OS資源の回収に約16〜18秒を要した構成を検出した。最終版の実測は検証記録に残し、このOS回収時間を隠して「8秒で全て消滅」とは表示しない。
 
+状態遷移は `停止完了 → VM起動中 → VM準備中 → 通信VM起動中 → 公開接続中 → 公開URL取得済み`、ローカル試験は `VM準備中 → ローカル準備完了` とする。各実行状態からOFF・失効・エラーで `停止処理中` へ進み、全所有物の回収後だけ `停止完了`、期限・停止API失敗なら `停止失敗` へ進む。`停止失敗` は再開不可でOS回収を要求する。遅着通知で停止済み／失敗を実行中へ戻さない。
+
 ## 隔離境界
 
 模擬VMも通信VMもNIC・共有ディレクトリ・永続ストレージを持たない。通信VMの非特権cloudflaredから受け付ける接続は、固定origin、固定Quick Tunnel APIの空POST一回、固定Cloudflare edgeのTLSだけに限定する。host cloudflaredや任意URLへの代替経路は設けない。ポリシー不成立・資産欠損時は公開を開始しない。詳細な許可先・検査・TLSの限界は `egress-isolation.md` を参照する。
 
 この境界の信頼基盤はmacOS、Virtualization.framework、ホスト仲介実装、VMカーネルとPID1である。ホストOS支配、カーネル脱出、許可されたCloudflareサービス内部の暗号化通信のあらゆる不正利用まで防ぐ保証ではない。Developer ID/Network Extensionを利用できない条件で、ホスト上の任意プロセスにOSの通信先制限をかけたとは主張しない。
+
+| 役割 | 権限・接続・寿命 |
+| --- | --- |
+| UI/Engine・ホスト仲介 | macOSの起動ユーザー。VZとアプリ保存先を所有。ホスト全体のOS通信制限ではなく固定用途の実装を信頼する |
+| 専用監視役・制御CLI | 同じユーザー。相手のUUIDジョブだけを制御。常駐・任意コマンドAPIなし |
+| 模擬サービス | Linux UID/GID65534。read-only root、NIC/共有/ディスクなし。7000公開応答と7001観測のvsockだけ |
+| 通信bridge | Linux UID/GID65534。rootのPID1が準備した固定loopback/vsock接続を仲介。NICなし |
+| cloudflared | Linux UID/GID65533。capabilityなし・NoNewPrivs・seccomp。固定loopbackへ限定し、ホストの固定API/edge検査を経由 |
+| 各VMのPID1 | Linux root。起動準備と子の寿命を管理する信頼基盤。ゲストroot支配を防いだという保証ではない |
 
 ## 最終観測と保存
 
