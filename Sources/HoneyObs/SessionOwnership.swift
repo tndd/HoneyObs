@@ -47,14 +47,99 @@ enum SessionOwnership {
         return "\(info.pbi_start_tvsec):\(info.pbi_start_tvusec)"
     }
     static func control(_ arguments: [String]) -> (Int32, String) {
-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/launchctl"); process.arguments = arguments
-        let output = Pipe(); process.standardOutput = output; process.standardError = output
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
-        } catch { return (-1, error.localizedDescription) }
+        controlCommand("/bin/launchctl", arguments: arguments)
     }
+
+    // launchctlにも生存期限を設ける。FDは継承対象だけを明示し、新しいPGIDを作らない。
+    private static func controlCommand(_ executable: String, arguments: [String], limit: Double = 2,
+                                       outputLimit: Int = 65_536) -> (Int32, String) {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        guard pipe(&descriptors) == 0 else { return (-1, "制御CLIのpipeを作成できません") }
+        let reader = descriptors[0], writer = descriptors[1]
+        defer { close(reader) }
+        for fd in descriptors { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        _ = fcntl(reader, F_SETFL, fcntl(reader, F_GETFL) | O_NONBLOCK)
+        var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { close(writer); return (-1, "制御CLIのFD設定に失敗") }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        guard posix_spawnattr_init(&attributes) == 0 else { close(writer); return (-1, "制御CLIの起動属性に失敗") }
+        defer { posix_spawnattr_destroy(&attributes) }
+        var defaults = sigset_t(), mask = sigset_t()
+        sigemptyset(&defaults); sigemptyset(&mask)
+        for value in [SIGTERM, SIGINT, SIGPIPE] { sigaddset(&defaults, value) }
+        let settings = [
+            posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
+            posix_spawn_file_actions_adddup2(&actions, writer, STDOUT_FILENO),
+            posix_spawn_file_actions_adddup2(&actions, writer, STDERR_FILENO),
+            posix_spawnattr_setsigdefault(&attributes, &defaults), posix_spawnattr_setsigmask(&attributes, &mask),
+            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))]
+        guard settings.allSatisfy({ $0 == 0 }) else { close(writer); return (-1, "制御CLIの起動設定に失敗") }
+        let argv = ([executable] + arguments).map { strdup($0) }
+        let envp = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
+        var argvPointers = argv + [nil], environmentPointers = envp + [nil], pid: pid_t = 0
+        let spawned = posix_spawn(&pid, executable, &actions, &attributes, &argvPointers, &environmentPointers)
+        close(writer)
+        guard spawned == 0 else { return (-1, "制御CLIを起動できません: \(spawned)") }
+        var output = Data(), status: Int32 = 0
+        let deadline = safetyTime() + limit
+        func drain() -> Bool {
+            var bytes = [UInt8](repeating: 0, count: 4096)
+            for _ in 0..<16 {
+                let count = Darwin.read(reader, &bytes, bytes.count)
+                if count <= 0 { return count == 0 || errno == EAGAIN || errno == EINTR }
+                guard output.count + count <= outputLimit else { return false }
+                output.append(contentsOf: bytes.prefix(count))
+            }
+            return true
+        }
+        func textOutput() -> String { String(decoding: output, as: UTF8.self) }
+        func abort(_ reason: String) -> (Int32, String) {
+            // この関数以外は子をreapしない。未reapならPIDは再利用されない。
+            // ECHILDでは所有を推測してkillしない。
+            var waited = waitpid(pid, &status, WNOHANG)
+            while waited < 0 && errno == EINTR { waited = waitpid(pid, &status, WNOHANG) }
+            guard waited == 0 || waited == pid else { return (-1, reason + "・子の終了所有を確認できません") }
+            if waited == 0 {
+                _ = Darwin.kill(pid, SIGKILL)
+                let reapDeadline = safetyTime() + 0.5
+                repeat {
+                    waited = waitpid(pid, &status, WNOHANG)
+                    if waited == pid { break }
+                    if waited < 0 && errno != EINTR { break }
+                    usleep(5_000)
+                } while safetyTime() < reapDeadline
+                if waited != pid {
+                    // OS自体の終了停滞も成功に変換しない。後のreapはPIDを殺さない。
+                    if waited == 0 {
+                        DispatchQueue.global(qos: .utility).async {
+                            var childStatus: Int32 = 0
+                            while waitpid(pid, &childStatus, 0) < 0 && errno == EINTR {}
+                        }
+                    }
+                    return (-1, reason + "・SIGKILL後のwaitは未確認")
+                }
+            }
+            return (-1, reason + "・子をreap済み\n" + textOutput())
+        }
+        while true {
+            guard drain() else { return abort("制御CLIの出力上限") }
+            if safetyTime() >= deadline { return abort("制御CLIの期限超過") }
+            let waited = waitpid(pid, &status, WNOHANG)
+            if waited == pid {
+                guard drain() else { return (-1, "制御CLIの出力上限・子をreap済み") }
+                let exitStatus = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
+                return (exitStatus, textOutput())
+            }
+            if waited < 0, errno != EINTR { return (-1, "制御CLIの終了所有を確認できません") }
+            usleep(5_000)
+        }
+    }
+    #if SESSION_CONTROL_TESTING
+    static func testingControl(_ executable: String, arguments: [String]) -> (Int32, String) {
+        controlCommand(executable, arguments: arguments)
+    }
+    #endif
     static func object(_ url: URL) -> [String: Any] {
         (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
     }
@@ -81,7 +166,7 @@ enum SessionOwnership {
         guard let pid, let identity, !identity.isEmpty else { return false }
         let end = safetyTime() + seconds
         repeat {
-            if birth(pid) != identity, control(["print", service]).0 != 0 { return true }
+            if birth(pid) != identity, control(["print", service]).0 == 113 { return true }
             usleep(50_000)
         } while safetyTime() < end
         return false
@@ -135,7 +220,7 @@ enum SessionOwnership {
                     if jobPID(clientService) == pid, birth(pid) == identity, ownerPID != nil, birth(ownerPID!) == ownerBirth { ready = true; break }
                     // 起動直後の通常終了も、既に書いた認証済みreadyと回収receiptで確認する。
                     if object(directory.appendingPathComponent("session-result.json"))["status"] as? Int32 == 0,
-                       birth(pid) != identity, control(["print", clientService]).0 != 0, control(["print", ownerService]).0 != 0 { return 0 }
+                       birth(pid) != identity, control(["print", clientService]).0 == 113, control(["print", ownerService]).0 == 113 { return 0 }
                 }
                 try save(["token": token, "expires": safetyTime() + 2], temporary.appendingPathComponent("launcher-lease.json"))
                 if ownerPID != nil, birth(ownerPID!) != ownerBirth { break }
