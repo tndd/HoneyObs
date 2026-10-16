@@ -27,6 +27,9 @@ jobs:
           cache: false
       - run: go test -race -count=1 ./...
         working-directory: guest
+      - name: 通信VMのLinux ARM64ビルド
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+        working-directory: egress
 
   dashboard:
     name: Playwrightの画面検証
@@ -59,6 +62,7 @@ jobs:
           go-version-file: guest/go.mod
           cache: false
       - run: bash tests/unit.sh
+      - run: bash tests/egress.sh
       - name: 製品Swiftの型検査
         run: swiftc -swift-version 5 -typecheck -framework Cocoa -framework Virtualization -framework Network -framework WebKit Sources/HoneyObs/*.swift
       - name: 開発署名と同梱資産の検査
