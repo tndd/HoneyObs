@@ -13,10 +13,13 @@ trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
 printf '%s\n' "$$" > "$lock/pid"
 bash scripts/build.sh
 python3 scripts/check_bundle.py
+python3 tests/session_control.py
 python3 tests/session_jobs.py
 python3 tests/integration.py --local
 bash tests/lifecycle.sh
 bash tests/egress.sh --vm
 bash tests/egress_engine.sh
+python3 tests/final_observation.py
+bash scripts/ownership_gate.sh
 python3 tests/self_pentest.py --close-after
 python3 tests/app_background.py
