@@ -106,7 +106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "restore": window?.deminiaturize(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
                 case "hide": NSApp.hide(nil)
                 case "show": NSApp.unhide(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
-                case "stop": engine.stop(reason:"検証からの停止")
+                case "stop":
+                    if dashboardSmoke { dashboard?.testAction("stop") }
+                    else { engine.stop(reason:"検証からの停止") }
                 case "capture": dashboard?.capture(to: engine.directory.appendingPathComponent("ui-capture.png"))
                 case "resize": window?.setContentSize(NSSize(width: 860, height: 650))
                 case "quit": NSApp.terminate(nil)
