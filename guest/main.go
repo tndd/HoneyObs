@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -44,31 +43,30 @@ func (c vmConn) SetDeadline(t time.Time) error {
 }
 
 type vmListener struct {
-	fd        int
-	closeOnce sync.Once
+	file *os.File
+	raw  syscall.RawConn
 }
 
 func (l *vmListener) Accept() (net.Conn, error) {
-	// Goのsyscall.AcceptはAF_VSOCKを変換できないため、アドレスなしでaccept4する。
-	n, _, e := syscall.Syscall6(syscall.SYS_ACCEPT4, uintptr(l.fd), 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
-	if e != 0 {
-		return nil, e
+	// sockaddr変換を避けつつ、Go netpollによってCloseで待機を解除する。
+	var n uintptr
+	var errno syscall.Errno
+	err := l.raw.Read(func(fd uintptr) bool {
+		n, _, errno = syscall.Syscall6(syscall.SYS_ACCEPT4, fd, 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
+		return errno != syscall.EAGAIN && errno != syscall.EINTR
+	})
+	if err != nil {
+		return nil, err
+	}
+	if errno != 0 {
+		return nil, errno
 	}
 	return vmConn{os.NewFile(n, "vsock")}, nil
 }
-func (l *vmListener) Close() error {
-	var err error
-	l.closeOnce.Do(func() {
-		// raw accept4はGo netpollのlistenerではない。close単独ではLinuxの
-		// ブロッキングacceptが起きずShutdownが終わらないため、先にshutdownする。
-		_ = syscall.Shutdown(l.fd, syscall.SHUT_RDWR)
-		err = syscall.Close(l.fd)
-	})
-	return err
-}
+func (l *vmListener) Close() error   { return l.file.Close() }
 func (l *vmListener) Addr() net.Addr { return vmAddr{} }
 func listenVM(port uint32) (*vmListener, error) {
-	fd, e := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	fd, e := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0)
 	if e != nil {
 		return nil, e
 	}
@@ -82,7 +80,13 @@ func listenVM(port uint32) (*vmListener, error) {
 		syscall.Close(fd)
 		return nil, e
 	}
-	return &vmListener{fd: fd}, nil
+	file := os.NewFile(uintptr(fd), "vsock-listener")
+	raw, err := file.SyscallConn()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return &vmListener{file: file, raw: raw}, nil
 }
 
 func isolation(targets []string) map[string]any {
