@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """私有launchd job、実VZ/XPC所有、故障直後のOS回収を外部から検証する。"""
+import argparse
 import json
 import os
 import pathlib
@@ -8,13 +9,18 @@ import select
 import signal
 import socket
 import subprocess
+import threading
 import time
 
+options_parser = argparse.ArgumentParser()
+options_parser.add_argument('--egress-fixture', action='store_true', help='EGRESS_TESTING専用appの固定loopback fixtureで通信VMも検証する')
+options_parser.add_argument('--case', action='append', default=[], help='指定した故障だけ再検証する')
+OPTIONS = options_parser.parse_args()
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = pathlib.Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
 OUT = ROOT / 'test-results' / ('session-ownership-' + time.strftime('%Y%m%d-%H%M%S'))
 OUT.mkdir(mode=0o700, parents=True)
-REPORT = {'actualVM': True, 'externalTunnel': False, 'cases': {},
+REPORT = {'actualVM': True, 'externalTunnel': False, 'actualEgressVM': OPTIONS.egress_fixture, 'cases': {},
           'unverified': ['owner と client を含む全監視処理の同時 SIGSTOP', '実スリープ・ログアウト', '独立外部経路']}
 
 
@@ -70,40 +76,66 @@ def signal_owned(pid, expected, sig):
     os.kill(pid, sig)
 
 
-def helpers(client, run):
+def helpers(client, run, allow_empty=False):
     result = command('/bin/launchctl', 'print', 'pid/' + str(client))
     assert result.returncode == 0 and f'creator = HoneyObs[{client}]' in result.stdout, result.stdout
     (run / 'xpc-owner.txt').write_text(result.stdout)
     owned = re.findall(r'^\s+(\d+)\s+\S+\s+(com\.apple\.Virtualization\.VirtualMachine\.[A-F0-9-]+)\s*$', result.stdout, re.M)
-    assert owned, '実VMのUUID付きXPCサービスをOS所有ドメインで確認できません'
+    if not allow_empty:
+        assert owned, '実VMのUUID付きXPCサービスをOS所有ドメインで確認できません'
     entries = []
     for pid, service in owned:
         pid = int(pid)
         identity = process(pid)
         assert '/Virtualization.framework/' in identity, identity
-        entries.append({'pid': pid, 'service': service, 'identity': identity})
+        entries.append({'pid': pid, 'service': service, 'identity': identity,
+                        'birth': command('/bin/ps', '-p', str(pid), '-o', 'lstart=').stdout.strip(),
+                        'command': command('/bin/ps', '-p', str(pid), '-o', 'command=').stdout.strip()})
     return entries
 
 
 EXE = APP / 'Contents/MacOS/HoneyObs'
 
-for fault in ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'monitor-stop', 'startup-stop']:
+faults = ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'monitor-stop', 'startup-stop',
+          'decoy-helper-kill', 'decoy-helper-stop']
+if OPTIONS.egress_fixture:
+    faults += ['egress-helper-kill', 'egress-helper-stop']
+if OPTIONS.case:
+    assert set(OPTIONS.case) <= set(faults), OPTIONS.case
+    faults = [case for case in faults if case in OPTIONS.case]
+for fault in faults:
     run = OUT / fault
     run.mkdir(mode=0o700)
     held = None
-    wrapper = subprocess.Popen([str(EXE), '--test-mode', '--headless', '--local-origin', '--run-directory', str(run)],
+    launch = [str(EXE), '--test-mode', '--headless', '--run-directory', str(run)]
+    launch += ['--public', '--test-egress-fixture'] if OPTIONS.egress_fixture else ['--local-origin']
+    wrapper = subprocess.Popen(launch,
                                stdout=(run / 'launcher.log').open('w'), stderr=subprocess.STDOUT)
-    owner = {}
+    owner = {}; witness = []; timeline = {}; resource_elapsed = None; start = None
+    stop_observer = threading.Event(); observer = None
     try:
         owner = wait(lambda: read(run / 'owner.json'), 15)
         client, monitor = owner['clientPID'], owner['ownerPID']
         assert client != monitor and owner.get('jobBodyIsVZOwner')
         state = wait(lambda: s if (s := read(run / 'state.json')).get('active') else None, 20)
-        witness = []
+        witness = []; decoy_service = None
+        if OPTIONS.egress_fixture and fault != 'startup-stop':
+            def decoy_before_egress():
+                if read(run / 'state.json').get('egressVMPresent'):
+                    raise AssertionError('egress作成前のdecoy XPC所有snapshotを採取できませんでした')
+                entries = helpers(client, run, allow_empty=True)
+                return entries if len(entries) == 1 else None
+            decoy_snapshot = wait(decoy_before_egress, 15)
+            decoy_service = decoy_snapshot[0]['service']
+            (run / 'decoy-before-egress.txt').write_text((run / 'xpc-owner.txt').read_text())
         if fault != 'startup-stop':
-            state = wait(lambda: s if (s := read(run / 'state.json')).get('originPort') else None, 40)
+            state = wait(lambda: s if (s := read(run / 'state.json')).get('originPort') and
+                         (not OPTIONS.egress_fixture or (s.get('egressVMPresent') and s.get('egressHealthy'))) else None, 50)
             port, host = state['originPort'], read(run / 'test-origin.json')['host']
             witness = helpers(client, run)
+            assert len(witness) >= (2 if OPTIONS.egress_fixture else 1), witness
+            for entry in witness:
+                entry['role'] = 'decoy' if not OPTIONS.egress_fixture or entry['service'] == decoy_service else 'egress'
             held = socket.create_connection(('127.0.0.1', port), 1)
             held.sendall(f'POST /login HTTP/1.1\r\nHost: {host}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx'.encode())
             time.sleep(.1)
@@ -114,8 +146,21 @@ for fault in ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'moni
         service = owner.get('clientService') or 'gui/' + str(os.getuid()) + '/' + owner['label']
         job = command('/bin/launchctl', 'print', service)
         assert job.returncode == 0 and re.search(r'(?m)^\s*pid = ' + str(client) + '$', job.stdout), job.stdout
-        start = time.monotonic()
-        if fault == 'normal-stop':
+        start = time.monotonic(); timeline = {}
+        def observe_stop():
+            while not stop_observer.is_set():
+                if read(run / 'state.json').get('stopping') and 'stopRequestedWithin' not in timeline:
+                    timeline['stopRequestedWithin'] = round(time.monotonic() - start, 3)
+                time.sleep(.025)
+        observer = threading.Thread(target=observe_stop, daemon=True); observer.start()
+        if '-helper-' in fault:
+            role = fault.split('-')[0]
+            target = next(entry for entry in witness if entry['role'] == role)
+            current = command('/bin/ps', '-p', str(target['pid']), '-o', 'command=').stdout.strip()
+            current_birth = command('/bin/ps', '-p', str(target['pid']), '-o', 'lstart=').stdout.strip()
+            assert current == target['command'] and current_birth == target['birth'] and '/Virtualization.framework/' in current, target
+            os.kill(target['pid'], signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
+        elif fault == 'normal-stop':
             (run / 'command').write_text('stop')
         elif fault == 'startup-stop':
             signal_owned(client, '--session-client', signal.SIGTERM)
@@ -135,7 +180,19 @@ for fault in ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'moni
                 content = b''
             cutoff = time.monotonic() - start
             assert content == b'' and cutoff < 6, (fault, cutoff, content)
-        if fault == 'normal-stop':
+        cooperative_helper_stop = False
+        if '-helper-' in fault:
+            def helper_recovered():
+                final = read(run / 'state.json')
+                return all(not alive(entry['pid']) for entry in witness) and (not alive(client) or
+                       (final.get('shutdownComplete') and not final.get('vmPresent') and not final.get('egressVMPresent')))
+            wait(helper_recovered, 17)
+            resource_elapsed = time.monotonic() - start
+            cooperative_helper_stop = alive(client)
+            if cooperative_helper_stop:
+                assert closed(port) and alive(monitor)
+                signal_owned(client, '--session-client', signal.SIGTERM)
+        elif fault == 'normal-stop':
             final = wait(lambda: s if (s := read(run / 'state.json')).get('shutdownComplete') else None)
             assert not final['vmPresent'] and final['canStart'] and closed(port), final
             wait(lambda: all(not alive(entry['pid']) for entry in witness))
@@ -146,6 +203,9 @@ for fault in ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'moni
                  max(.1, 8 - (time.monotonic() - start)))
             if fault != 'startup-stop':
                 assert closed(port), 'OS回収後も入口が開いています'
+        if '-helper-' not in fault:
+            resource_elapsed = time.monotonic() - start
+        stop_observer.set(); observer.join(timeout=1)
         wrapper.wait(timeout=12)
         wait(lambda: command('/bin/launchctl', 'print', service).returncode != 0)
         monitor_service = owner.get('ownerService')
@@ -156,16 +216,30 @@ for fault in ['normal-stop', 'client-kill', 'monitor-kill', 'client-stop', 'moni
         socket_directory = owner.get('socketDirectory')
         assert socket_directory and not pathlib.Path(socket_directory).exists(), '故障後も管理socketが残っています'
         REPORT['cases'][fault] = {'existingSocketClosedWithin': round(cutoff, 3) if cutoff is not None else None,
+                                  'operationalResourcesRecoveredWithin': round(resource_elapsed, 3),
                                   'allRecoveredWithin': round(time.monotonic() - start, 3), 'bothJobsRemoved': True,
+                                  'stopRequestedWithin': timeline.get('stopRequestedWithin'),
+                                  'recoveredAfterStopRequest': round(resource_elapsed - timeline['stopRequestedWithin'], 3) if 'stopRequestedWithin' in timeline else None,
+                                  'cooperativeHelperStop': cooperative_helper_stop,
                                   'directVZOwnerGone': True, 'monitorGone': True, 'xpcHelpersGone': True,
                                   'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True}
         print(fault + ': PASS', flush=True)
     except BaseException as error:
         REPORT['cases'][fault] = {'failed': repr(error), 'owner': owner, 'state': read(run / 'state.json'),
-                                  'membersBeforeCleanup': members(owner.get('clientPGID', -1))}
+                                  'membersBeforeCleanup': members(owner.get('clientPGID', -1)),
+                                  'clientAliveBeforeCleanup': alive(owner['clientPID']) if owner else None,
+                                  'monitorAliveBeforeCleanup': alive(owner['ownerPID']) if owner else None,
+                                  'helpersBeforeCleanup': [dict(entry, alive=alive(entry['pid'])) for entry in witness],
+                                  'elapsedAtFailure': round(time.monotonic() - start, 3) if start else None,
+                                  'operationalResourcesRecoveredWithin': round(resource_elapsed, 3) if resource_elapsed is not None else None,
+                                  'timeline': timeline,
+                                  'socketExistsBeforeCleanup': pathlib.Path(owner['socketDirectory']).exists() if owner.get('socketDirectory') else None}
         (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
         raise
     finally:
+        stop_observer.set()
+        if observer:
+            observer.join(timeout=1)
         if held:
             held.close()
         # Cleanup is after evidence collection and never a success witness.
