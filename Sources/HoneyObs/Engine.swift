@@ -16,6 +16,21 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var sessions: [UUID: Relay] = [:]
     private var pending: [UUID: NWConnection] = [:]
     private var supervisor: Process?
+    private var permit: ForwardingPermit?
+    private var permitTimer: Timer?
+    private var leaseWriter: FileHandle?
+    private var leaseReader: FileHandle?
+    private var ackBytes = Data()
+    private var leaseSequence: UInt64 = 0
+    private var ackSequence: UInt64 = 0
+    private var guardianDeadline = 0.0
+    private var guardianStarted = 0.0
+    private var guestConfirmed = 0.0
+    private var uiConfirmed = 0.0
+    var requiresUIHeartbeat = false
+    func confirmUI(session: String) {
+        guard session == sessionID else { return }; uiConfirmed = safetyTime()
+    }
     private var timer: Timer?
     private var wantsPublic = false
     private var localExercise = false
@@ -56,6 +71,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     }
     var canStart: Bool { shutdownComplete }
     var isActive: Bool { active }
+    var isLocalExercise: Bool { localExercise }
 
     init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
@@ -93,6 +109,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     func start(publish: Bool, localExercise: Bool = false) {
         guard canStart else { return }
         self.localExercise = localExercise
+        permit = nil; guestConfirmed = 0; uiConfirmed = 0; leaseSequence = 0; ackSequence = 0; guardianDeadline = 0; ackBytes = Data()
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
         runError = nil; lastGuestReply = ProcessInfo.processInfo.systemUptime
         generation = UUID(); let current = generation
@@ -160,6 +177,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   json["uid"] as? Int == 65534 else { return }
             self.lastGuestReply = ProcessInfo.processInfo.systemUptime
+            self.guestConfirmed = safetyTime()
             do {
                 try self.observations.ingest(data)
                 let archive = try self.observations.encoded()
@@ -195,6 +213,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     }
 
     private func startOrigin() {
+        let confirmed = requiresUIHeartbeat ? min(guestConfirmed, uiConfirmed) : guestConfirmed
+        let permission = ForwardingPermit(confirmedAt: confirmed)
+        guard permission.valid else { fail("画面またはVMの応答が古いため転送を開始しません"); return }
+        permit = permission
+        permitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.maintainPermit() }
         do {
             let parameters = NWParameters.tcp
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -214,7 +237,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 }
             }
             server.newConnectionHandler = { [weak self] client in
-                guard let self, self.active, self.generation == current,
+                guard let self, self.active, self.generation == current, permission.valid,
                       let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { client.cancel(); return }
                 guard self.pending.count + self.sessions.count < 8 else {
                     self.recordHostRejection("connection_limit"); client.cancel(); return
@@ -222,7 +245,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 let pendingID = UUID(); self.pending[pendingID] = client
                 device.connect(toPort: 7000) { result in
                     self.pending.removeValue(forKey: pendingID)
-                    guard self.active, self.generation == current else {
+                    guard self.active, self.generation == current, permission.valid else {
                         client.cancel()
                         if case .success(let guest) = result { guest.close() }
                         self.advanceStop(); return
@@ -231,7 +254,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                     case .failure: self.recordHostRejection("guest_connect"); client.cancel()
                     case .success(let guest):
                         let id = UUID()
-                        let relay = Relay(client: client, guest: guest, rejected: { [weak self] reason in
+                        let relay = Relay(client: client, guest: guest, permit: permission, rejected: { [weak self] reason in
                             guard let self, self.generation == current else { return }
                             self.recordHostRejection(reason)
                         }) { [weak self] in
@@ -250,6 +273,33 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         else { startTunnel() }
     }
 
+    private func maintainPermit() {
+        guard active, let permit else { return }
+        let confirmed = requiresUIHeartbeat ? min(guestConfirmed, uiConfirmed) : guestConfirmed
+        guard permit.renew(confirmedAt: confirmed) else { fail("転送許可の期限切れにより停止します"); return }
+        guard let writer = leaseWriter, let reader = leaseReader else { return }
+        var buffer = [UInt8](repeating: 0, count: 512)
+        let count = Darwin.read(reader.fileDescriptor, &buffer, buffer.count)
+        if count == 0 { fail("監視役との確認通信が切断されました"); return }
+        if count > 0 { ackBytes.append(contentsOf: buffer.prefix(count)) }
+        while ackBytes.count >= 16 {
+            let frame = Data(ackBytes.prefix(16)); ackBytes.removeFirst(16)
+            let sequence = frame.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+            let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
+            guard sequence > ackSequence, sequence <= leaseSequence else { fail("監視役の確認番号が不正です"); return }
+            ackSequence = sequence; guardianDeadline = Double(expiry) / 1_000_000_000
+        }
+        if safetyTime() - guardianStarted > 1, guardianDeadline <= safetyTime() {
+            fail("監視役の応答期限を超えたため転送を停止します"); return
+        }
+        leaseSequence += 1
+        var sequence = leaseSequence, expiry = UInt64(permit.deadline * 1_000_000_000)
+        var frame = withUnsafeBytes(of: &sequence) { Data($0) }
+        frame.append(withUnsafeBytes(of: &expiry) { Data($0) })
+        let written = frame.withUnsafeBytes { Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) }
+        if written != frame.count { fail("監視役への転送許可を送れません") }
+    }
+
     private func startTunnel() {
         guard supervisor == nil else { return }
         let log = directory.appendingPathComponent("tunnel.log")
@@ -263,11 +313,17 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                              "tunnel", "--config", config.path, "--no-autoupdate", "--url", "http://127.0.0.1:\(localPort)",
                              "--http-host-header", originHost, "--protocol", "http2", "--metrics", "127.0.0.1:0"]
         let handle = try? FileHandle(forWritingTo: log)
-        process.standardOutput = handle; process.standardError = handle
+        let leases = Pipe(), acknowledgements = Pipe()
+        process.standardInput = leases; process.standardOutput = acknowledgements; process.standardError = handle
+        leaseWriter = leases.fileHandleForWriting; leaseReader = acknowledgements.fileHandleForReading
+        for fd in [leaseWriter!.fileDescriptor, leaseReader!.fileDescriptor] { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+        guardianStarted = safetyTime()
         process.terminationHandler = { [weak self] exited in
             DispatchQueue.main.async {
                 guard let self, self.supervisor === exited else { return }
                 self.supervisor = nil
+                try? self.leaseWriter?.close(); self.leaseWriter = nil
+                try? self.leaseReader?.close(); self.leaseReader = nil
                 // 監視役の正常終了は子のwaitUntilExit後だけ。異常終了では回収を推測しない。
                 if exited.terminationReason != .exit || exited.terminationStatus != 0 {
                     self.supervisorUnconfirmed = true
@@ -276,7 +332,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 else { self.advanceStop(); self.update() }
             }
         }
-        do { try process.run(); supervisor = process; phase = "公開接続中"; update() }
+        do {
+            try process.run(); supervisor = process
+            try? leases.fileHandleForReading.close(); try? acknowledgements.fileHandleForWriting.close()
+            maintainPermit(); if active { phase = "公開接続中"; update() }
+        }
         catch { fail(error.localizedDescription) }
         try? handle?.close()
     }
@@ -324,6 +384,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         guard !stopping else { return }
         active = false; generation = UUID(); phase = "停止処理中"; detail = reason
         stopping = true; stopFailed = false; stopRequested = false
+        permit?.revoke(); permitTimer?.invalidate(); permitTimer = nil
+        try? leaseWriter?.close(); leaseWriter = nil
         stopAttempt = UUID(); stopStarted = ProcessInfo.processInfo.systemUptime
         timer?.invalidate(); timer = nil
         publicSession?.invalidateAndCancel(); publicSession = nil

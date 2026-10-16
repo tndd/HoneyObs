@@ -171,3 +171,26 @@ AppKitの終了待ちを初めにterminateLaterで実装したところ、実ア
 `bash scripts/build.sh`、`bash scripts/install.sh`、`python3 tests/installed_app.py`、既存の `npm test` と拡張した `node tests/live_dashboard.cjs` が合格しました。導入済みコピーを `/tmp` からLaunch Servicesで起動し、実行パス、repoファイル非参照、バンドル資産利用、アイコン、署名、20ケース・160件全件記録・低速8接続の拒否・第9接続拒否・回復・VMと入口停止を確認しました。製品WKWebViewからの中止、860px表示、完了画像と中止画像の目視確認も実施しました。記録は `test-results/installed-app-20261017-005119/report.json` です。独立した既存試験 `python3 tests/self_pentest.py --gui --close-after` も合格し、`test-results/self-pentest-20261017-005119-77055e/report.json` に保存しました。
 
 今回、公開経路自体と停止APIは変更していないため、外部公開の再試験や停止API故障注入の全体再実行は省略しました。Developer ID署名・公証や一般配布向けインストーラーは含みません。このMac向けのローカル署名です。
+
+
+## フリーズ時の転送失効（2026-10-17、#19）
+
+画面の一回限りの確認応答、VMの新しい応答、メイン処理とwatchdogの専用パイプを用いる3秒の許可を追加しました。Relayは100ms周期の独立検査と各転送境界で失効を確認します。古い応答を延命せず、SIGCONTでも失効した許可を復活させません。設計と残る回収限界は `safety-strategy.md` に記載しています。
+
+検証済み：
+
+- `bash scripts/build.sh`、`npm test`、`node tests/live_dashboard.cjs`：ビルド・署名と従来画面が合格。
+- `tests/PermitChecks.swift`：上流の古い時刻から延命しない、期限境界、期限切れ／OFF後の更新不可、別許可との分離を確認。失効後の更新を許す試験用変異では失敗を検出（`test-results/permit-mutation/failure.log`）。製品ソースは変異させていません。
+- `python3 tests/permit_faults.py`：導入済み.appと実VMの本文送信途中で、主スレッド5秒停止とGUIのJS無限ループを注入。クライアント接続は実測2.468秒／3.041秒で閉鎖し、失効後に投入した新規要求へも応答せず、通常ループ復帰後のVM・入口停止を確認。
+- 同試験で、トンネル資産だけを通信しない固定子プロセスへ置換した署名済みバンドルを使用。親SIGSTOP中の子の終了は2.481秒、watchdogのSIGSTOP中の公開入口閉鎖は2.447秒。観測前にcleanupせず、SIGCONT後のVM・watchdog・子の全終了と再開不可を確認。旧許可フレームの再送も拒否し、子のwait完了を確認。記録：`test-results/permit-faults-20261017-010656/report.json`。
+- `python3 tests/installed_app.py`：期限導入後の正常20ケース／160件／低速接続／回復・停止と、GUI中止・repo非参照が合格。`test-results/installed-app-20261017-010612/report.json`。中止画面を目視確認。実行中の導入済み.appのNSRunningApplicationからアイコンも取得・目視確認。
+- 独立した既存 `python3 tests/self_pentest.py --gui --close-after`：全ケースとGUI22回照合が合格（`test-results/self-pentest-20261017-010036-43fb71/report.json`）。
+- `bash tests/lifecycle.sh` と `python3 tests/integration.py --local`：起動中停止・API失敗・無応答・遅着・ゲスト応答喪失、および実VMの既存隔離プローブが合格。`test-results/lifecycle-79D91007-2D1C-4656-8BD3-4F6429988A6C/`、`test-results/verification-20261017-010046/`。
+
+途中、既存接続の試験でHTTP 400を受信して失敗しました。送った不完全ヘッダーに対するゲスト側の2秒の拒否であり、3秒の許可期限前の応答でした。本文読取りを継続する要求に変更し、期限切れ前に応答したヘッダー拒否を「期限切れ後の転送」と混同せず検証し直しました。また、GUI中止と送信が競合してHTTP 0を失敗表示する不具合を見つけ、ユーザーの中止として記録・表示するよう修正し、失敗した導入済みアプリ試験を再実行して合格しました。
+
+試験専用の `--ui-exercise-smoke` 指定時には700の私有ディレクトリ内だけにHost確認値を保存して、本文送信途中の試験に使います。通常起動ではこの出力を行いません。要求とHost値をGUI進行や共有レポートへ渡しません。
+
+この段階では外部公開を行っていません。Cloudflare実経路、実スリープ、OS停止、watchdog自体のSIGKILL後に残る子のOS所有・全回収は今回の合格範囲へ含めません。テストの最後のcleanupは成否判定とは別です。#2〜#7の全体課題は継続します。
+
+最終確認では、IP偽装ケースまで進めて中止し、通常画面へ戻った際もローカル試験として扱う操作を追加しました。試験パネルを閉じると申告IPを地理推定へ戻してしまう箇所を修正し、セッションが変わるまでは試験の印を維持します。通常完了・送信中の中止・IP偽装後の中止と通常画面復帰の3経路を、導入済みアプリで検証して合格しました（`test-results/installed-app-20261017-011149/report.json`）。画面復帰後は選択経路と背景経路の双方が0であることも追加で確認して合格しました（`test-results/installed-app-20261017-011355/report.json`）。停止中は確認値を発行せず、同一内容の画面更新を継続しないようにしています。

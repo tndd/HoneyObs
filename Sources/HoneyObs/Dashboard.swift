@@ -9,6 +9,7 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private let documentURL: URL
     private var ready = false
     private var lastPayload = Data()
+    private var heartbeatChallenge = ""
     var onReady: (() -> Void)?
     var exercise: [String: Any]?
     var onExerciseStop: (() -> Void)?
@@ -33,6 +34,13 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         guard message.frameInfo.isMainFrame,
               message.frameInfo.request.url?.standardizedFileURL == documentURL.standardizedFileURL,
               let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
+        if action == "heartbeat" {
+            if body["challenge"] as? String == heartbeatChallenge, !heartbeatChallenge.isEmpty,
+               let session = body["session"] as? String {
+                heartbeatChallenge = ""; engine.confirmUI(session: session)
+            }
+            return
+        }
         // 自己ペネ画面から公開・再起動を指示できないよう、ネイティブ側でも制限する。
         if exercise != nil, action != "ready" {
             if action == "stop" { onExerciseStop?() }
@@ -57,13 +65,17 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     func refresh() {
         guard ready else { return }
+        heartbeatChallenge = engine.isActive ? UUID().uuidString : ""
         var payload: [String: Any] = ["session": engine.sessionID, "phase": engine.phase,
             "active": engine.isActive, "canStart": engine.canStart, "shutdownComplete": engine.shutdownComplete, "url": engine.publicURL,
             "detail": engine.detail, "total": engine.eventCount, "observation": engine.observationStatus,
             "events": engine.events.reversed().map { $0.presentation(geo: geo) },
-            "geoAvailable": geo.available, "geoEdition": GeoIP.edition]
+            "geoAvailable": geo.available, "geoEdition": GeoIP.edition, "uiChallenge": heartbeatChallenge,
+            "localExercise": engine.isLocalExercise || exercise != nil]
         if let exercise {
             payload["exercise"] = exercise
+        }
+        if engine.isLocalExercise || exercise != nil {
             // ヘッダー偽装試験の申告IPを、実際の通信元の位置として地図に載せない。
             payload["events"] = engine.events.reversed().map { event -> [String: Any] in
                 var value = event.presentation(geo: geo)
@@ -102,10 +114,13 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     // --ui-dashboard-smoke指定時だけ使う検証経路。公開・停止は通常画面と同じボタンを通す。
+    func testFreezeUI() { webView.evaluateJavaScript("while (true) {}") }
+
     func testAction(_ action: String) {
         let scripts = ["public": "document.querySelector('#toggle').click()",
                        "local": "document.querySelector('#local').click()",
                        "exercise": "document.querySelector('#exercise').click()",
+                       "back": "document.querySelector('#exercise-back').click()",
                        "stop": "document.querySelector('#toggle').click()",
                        "first": "document.querySelector('.event')?.click()",
                        "last": "document.querySelector('#events li:last-child .event')?.click()"]
@@ -124,11 +139,13 @@ final class Dashboard: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
           rows:document.querySelectorAll('.event').length,
           selected:document.querySelector('.event[aria-pressed=true]')?.dataset.id || '',
           routes:document.querySelectorAll('.route').length,
+          allRoutes:document.querySelectorAll('.route,.context-route').length,
           packets:document.querySelectorAll('.packet').length,
           canStart:!document.querySelector('#local').disabled,
           url:document.querySelector('#url').textContent,
           width:innerWidth,height:innerHeight,
           exerciseStage:document.querySelector('#exercise-stage').textContent,
+          exerciseVisible:!document.querySelector('#exercise-panel').hidden,
           exerciseScenario:document.querySelector('#exercise-scenario').textContent,
           exerciseResponse:document.querySelector('#exercise-response').textContent,
           exerciseRecord:document.querySelector('#exercise-record').textContent,
