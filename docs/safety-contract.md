@@ -14,6 +14,8 @@
 
 `shutdownComplete` は、模擬VM・通信VM・入口・確立済みRelay・接続待ち・通信仲介・ログ回収FDの解放を確認した場合だけ成立する。停止済みの画面を表示するUIは残せる。期限超過やVM停止失敗を成功へ書き換えない。強制終了試験では外部witnessから一時ジョブ、所有者、UUIDで対応づけたVirtualization XPC helperを観測する。試験後のcleanupは別に記録し、cleanupによる消滅を製品の回収成功に数えない。
 
+Engineの停止確認期限8秒は停止要求の起点であり、故障発生からOS/XPC全回収までの上限ではない。補助プロセスSIGSTOPの試験では新規転送は約2秒で遮断された一方、全OS資源の回収に約16〜18秒を要した構成を検出した。最終版の実測は検証記録に残し、このOS回収時間を隠して「8秒で全て消滅」とは表示しない。
+
 ## 隔離境界
 
 模擬VMも通信VMもNIC・共有ディレクトリ・永続ストレージを持たない。通信VMの非特権cloudflaredから受け付ける接続は、固定origin、固定Quick Tunnel APIの空POST一回、固定Cloudflare edgeのTLSだけに限定する。host cloudflaredや任意URLへの代替経路は設けない。ポリシー不成立・資産欠損時は公開を開始しない。詳細な許可先・検査・TLSの限界は `egress-isolation.md` を参照する。
