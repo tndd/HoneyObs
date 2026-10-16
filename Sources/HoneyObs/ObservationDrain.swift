@@ -26,6 +26,7 @@ final class ObservationDrain {
         pages += 1
         let cancel = request("/?after=\(store.lastID)&finalize=1") { [weak self] result in
             guard let self, !self.finished else { return }
+            guard ProcessInfo.processInfo.systemUptime-self.started < self.budget else { self.finish("取得期限"); return }
             self.cancelRead = nil
             do {
                 let data = try result.get()

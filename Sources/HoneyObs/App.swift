@@ -158,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args, directory: options.directory))
             }
             let ownership = try SessionClient(arguments: args, directory: options.directory)
-            let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets)
+            let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets, requireManagedArchive:!options.testing)
             #if EGRESS_TESTING
             if args.contains("--test-egress-fixture") { try engine.enableEgressTestingFixture() }
             #endif

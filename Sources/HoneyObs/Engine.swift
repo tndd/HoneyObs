@@ -93,7 +93,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 "permitDeadline":permit?.deadline ?? 0,"permitValid":permit?.valid ?? false]
     }
 
-    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "",
+    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "", requireManagedArchive: Bool = false,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
          readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil) throws {
         self.directory = directory; self.resources = resources; self.testing = testing; self.probeTargets = probeTargets
@@ -101,7 +101,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         self.readGuest = readGuest
         super.init()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        if !testing, FileManager.default.fileExists(atPath:directory.appendingPathComponent("session-owner.json").path) {
+        if requireManagedArchive {
             archiveSession = try SessionArchive(directory:directory)
         }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
