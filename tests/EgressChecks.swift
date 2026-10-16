@@ -54,7 +54,8 @@ import Darwin
         let permit = ForwardingPermit(confirmedAt:safetyTime())
         var renewal: Timer? = Timer.scheduledTimer(withTimeInterval:0.2,repeats:true){_ in _ = permit.renew(confirmedAt:safetyTime())}
         defer { renewal?.invalidate() }
-        let fake = try NWListener(using:.tcp, on:.any)
+        let fakeParameters=NWParameters.tcp;fakeParameters.requiredLocalEndpoint = .hostPort(host:"127.0.0.1",port:.any)
+        let fake = try NWListener(using:fakeParameters)
         var fakePort: UInt16 = 0, captured = 0, foreignSNIReachedFake = false
         var fakeClients: [NWConnection] = []
         fake.stateUpdateHandler = { state in if case .ready = state { fakePort = fake.port!.rawValue } }

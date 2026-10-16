@@ -37,6 +37,8 @@ NICもデフォルトルートもないため、IPv4 TCPが使えてもLAN・ホ
 
 `EgressVM`は既存の期限付き転送許可を全中継で100ms周期とI/Oごとに検査する。PID1からの新しいnonce応答、cloudflaredのUID/capability/no_new_privs/seccomp、生存状態を0.5秒周期で確認する。確認が2秒古くなったら失敗として停止する。PID1の自己申告をVM基盤やLinuxカーネル侵害の検出と呼ばない。
 
+シリアル出力はホストの独立したpipe drainで読み、tunnel.logを最大256KiBに制限する。VM停止後に最終drainと全FDのclose完了まで所有を保つ。
+
 停止時は新規vsock受付を外し、全中継をshutdownして、VZ停止の成功と中継worker・NWConnection・進行中の健康確認の終了を待つ。失敗・8秒の期限超過では所有を保ち、`shutdownComplete`を偽にして再開始を拒否する。起動途中の停止もVZの所有を捨てない。GUI/Engineを直接launchdのジョブ本体にするOS所有との組合せは統合側で検証する。
 
 ## 確認したことと残る限界
@@ -58,3 +60,9 @@ NICもデフォルトルートもないため、IPv4 TCPが使えてもLAN・ホ
 - [cloudflared 2026.10.0のプロトコル](https://github.com/cloudflare/cloudflared/blob/2026.10.0/connection/protocol.go)：HTTP2のSNI。
 - [Cloudflareの通信許可先](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/)：TCP7844とedgeアドレス。
 - [Linux seccomp filter仕様](https://docs.kernel.org/userspace-api/seccomp_filter.html)：継承するsyscall制限。
+
+## 製品EngineとOS所有の統合試験
+
+`bash tests/egress_engine.sh` は製品Engineで二台の実VMを起動し、模擬API/edgeだけでURL・画面に渡す状態・両VMと接続の停止を確認する。ホストのcloudflared/旧watchdogは起動しない。公開URLの取得後も「外部からの到達は未確認」と表示し、URLへホストが自動でアクセスしない。
+
+OS所有の故障注入には、アプリ本体だけを `-D EGRESS_TESTING` 付きでビルドした私有の試験バンドルを使い、`--test-mode --headless --public --test-egress-fixture --run-directory <0700の試験保存先>` で起動する。これによりlaunchd配下の実際のGUI/Engine本体が二台のVMを持ち、固定localhostの模擬API/edgeを使う。monitor/helperは通常ビルドのままでよい。通常製品のアプリ本体ではfixture指定をOS所有やVMの開始より前に拒否する。模擬URLと資格情報は固定の無効な値で、実外部APIやedgeへ接続しない。

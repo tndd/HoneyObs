@@ -148,11 +148,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         do {
             let options = try LaunchOptions(arguments: args)
+            if args.contains("--test-egress-fixture") {
+                guard options.testing else { throw NSError(domain:"HoneyObs.EgressFixture",code:1,userInfo:[NSLocalizedDescriptionKey:"通信VMの模擬接続には検証モードが必要です"]) }
+                #if !EGRESS_TESTING
+                throw NSError(domain:"HoneyObs.EgressFixture",code:1,userInfo:[NSLocalizedDescriptionKey:"通信VMの模擬接続は検証専用ビルドだけで使用できます"])
+                #endif
+            }
             if !args.contains("--session-client") {
                 exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args, directory: options.directory))
             }
             let ownership = try SessionClient(arguments: args, directory: options.directory)
             let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets)
+            #if EGRESS_TESTING
+            if args.contains("--test-egress-fixture") { try engine.enableEgressTestingFixture() }
+            #endif
             ownership.requiresRecovery = { engine.requiresSessionRecovery }
             ownership.onRevoke = { engine.stop(reason: "OS監視の確認期限切れ") }
             let delegate = AppDelegate(engine: engine, options: options)

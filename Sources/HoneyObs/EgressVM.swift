@@ -8,7 +8,8 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private let originPort: UInt16, originHost: String, permit: ForwardingPermit
     private let onFailure: (String) -> Void
     private var machine: VZVirtualMachine?
-    private var console: FileHandle?
+    private var console: BoundedConsole?
+    private var consoleClosing = false
     private var listeners: [UInt32: VZVirtioSocketListener] = [:]
     private var streams: [UUID: EgressStream] = [:]
     private var healthTimer: Timer?, stopTimer: Timer?
@@ -21,8 +22,9 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private(set) var lastHealthAt = 0.0
     private(set) var status: [String: Any] = [:]
     var healthy: Bool { active && safetyTime() - lastHealthAt < 2 }
-    var shutdownComplete: Bool { machine == nil && streams.isEmpty && listeners.isEmpty && !healthPending && !stopping && !stopFailed && testPendingCount == 0 }
+    var shutdownComplete: Bool { !active && machine == nil && console == nil && streams.isEmpty && listeners.isEmpty && !healthPending && !stopping && !stopFailed && testPendingCount == 0 }
     var canStart: Bool { shutdownComplete }
+    var requiresSessionRecovery: Bool { stopFailed }
     var publicURL: String {
         guard let log = try? String(contentsOf: directory.appendingPathComponent("tunnel.log"), encoding: .utf8),
               let range = log.range(of: "https://[a-z0-9-]+\\.trycloudflare\\.com", options: .regularExpression) else { return "" }
@@ -56,10 +58,9 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
             config.socketDevices = [VZVirtioSocketDeviceConfiguration()]; config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let log = directory.appendingPathComponent("tunnel.log")
-            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            console = try FileHandle(forWritingTo: log)
+            console = try BoundedConsole(url: log) { [weak self] error in self?.fail("通信VMのログ保存失敗: " + error.localizedDescription) }
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!)
+            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!.writer)
             config.serialPorts = [serial]; try config.validate()
             let vm = VZVirtualMachine(configuration: config); machine = vm; vm.delegate = self
             guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else { throw error("通信VMのvsockがありません") }
@@ -161,18 +162,26 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private func advanceStop() {
         guard stopping else { return }
         if let vm = machine {
-            if vm.state == .stopped { machine = nil; try? console?.close(); console = nil }
+            if vm.state == .stopped { machine = nil; closeConsole() }
             else if vm.canStop && !stopRequested {
                 stopRequested = true
                 vm.stop { [weak self] error in
                     guard let self, self.machine === vm else { return }
                     if let error { self.stopFailed = true; self.finishStop(false); self.onFailure("通信VMの停止失敗: " + error.localizedDescription) }
-                    else { self.machine = nil; try? self.console?.close(); self.console = nil; self.advanceStop() }
+                    else { self.machine = nil; self.closeConsole(); self.advanceStop() }
                 }
             }
         }
-        if machine == nil && streams.isEmpty && !healthPending && testPendingCount == 0 { finishStop(!stopFailed) }
+        if machine == nil { closeConsole() }
+        if machine == nil && console == nil && streams.isEmpty && !healthPending && testPendingCount == 0 { finishStop(!stopFailed) }
         else if safetyTime() - stopStarted > 8 { stopFailed = true; finishStop(false) }
+    }
+    private func closeConsole() {
+        guard let collector = console, !consoleClosing else { return }; consoleClosing = true
+        collector.close { [weak self, weak collector] in
+            guard let self, let collector, self.console === collector else { return }
+            self.console = nil; self.consoleClosing = false; self.advanceStop()
+        }
     }
     private func finishStop(_ success: Bool) {
         guard stopping else { return }; stopping = false; stopTimer?.invalidate(); stopTimer = nil
