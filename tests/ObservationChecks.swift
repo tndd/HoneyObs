@@ -17,6 +17,9 @@ import Foundation
         precondition(gap.uncollected == 32 && gap.evicted == 0)
         let encoded = try JSONSerialization.jsonObject(with: gap.encoded()) as! [String: Any]
         precondition(encoded["uncollected"] as? Int == 32)
+        let invalid = try JSONSerialization.data(withJSONObject:["boot":"fixed","total":1,"events":[
+            ["id":1,"time":"now","method":"GET","path":String(repeating:"x",count:513),"ip":"","status":404,"test":false]]])
+        do { try ObservationStore().ingest(invalid); fatalError("過大なゲスト記録を受理した") } catch {}
         print("分割取得・保持上限・欠落数・重複拒否: PASS")
     }
 }

@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 import time
-from integration import APP, ROOT, read, wait, alive, curl
+from integration import APP, ROOT, read, wait, alive, curl, bootout_owned
+from qa_registry import register_app
 
 
 def main():
@@ -12,9 +13,10 @@ def main():
     result = {}
     for name, flag in [('local', '--ui-smoke'), ('public-quit', '--ui-public-smoke')]:
         directory = base / name
-        directory.mkdir(parents=True)
+        directory.mkdir(mode=0o700, parents=True)
         with (directory / 'app.log').open('w') as log:
-            process = subprocess.Popen([str(APP), flag, '--run-directory', str(directory)], stdout=log, stderr=subprocess.STDOUT)
+            register_app(APP.parents[2])
+            process = subprocess.Popen([str(APP), '--test-mode', flag, '--run-directory', str(directory)], stdout=log, stderr=subprocess.STDOUT)
             try:
                 process.wait(timeout=260 if name == 'public-quit' else 30)
                 assert process.returncode == 0, process.returncode
@@ -27,8 +29,7 @@ def main():
                     assert state['vmPresent'] is False
                 else:
                     assert (directory / 'ui-public.png').is_file()
-                    guard = read(directory / 'watchdog.json')
-                    wait(lambda: not alive(guard['watchdogPID']) and not alive(guard['tunnelPID']), 9)
+                    assert not state['vmPresent'] and not state.get('egressVMPresent', False)
                     status, body, _ = curl(state['url'] + '/honeyobs-test-after-ui-quit')
                     assert body != b'Not found\n'
                     result['publicStatusAfterQuit'] = status
@@ -37,9 +38,7 @@ def main():
             finally:
                 if process.poll() is None:
                     process.kill(); process.wait()
-                guard = read(directory / 'watchdog.json')
-                if guard:
-                    wait(lambda: not alive(guard['watchdogPID']) and not alive(guard['tunnelPID']), 9)
+                bootout_owned(directory)
     (base / 'report.json').write_text(json.dumps(result, ensure_ascii=False, indent=2))
     print('画面と記録:', base)
 

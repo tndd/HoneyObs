@@ -1,65 +1,9 @@
 import Cocoa
 import Darwin
 
-private var watchdogStop: sig_atomic_t = 0
-
-func watchdog(_ args: [String]) {
-    guard args.count > 5, let parent = Int32(args[2]) else { exit(2) }
-    signal(SIGTERM) { _ in watchdogStop = 1 }; signal(SIGINT) { _ in watchdogStop = 1 }
-    signal(SIGPIPE, SIG_IGN)
-    for fd in [STDIN_FILENO, STDOUT_FILENO] { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
-    var pending = Data(), sequence: UInt64 = 0, expires = 0.0
-    func receivePermit() -> Bool {
-        var bytes = [UInt8](repeating:0,count:512)
-        let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
-        if count == 0 { return false }
-        if count < 0 && errno != EAGAIN && errno != EINTR { return false }
-        if count > 0 { pending.append(contentsOf:bytes.prefix(count)) }
-        while pending.count >= 16 {
-            let frame = Data(pending.prefix(16)); pending.removeFirst(16)
-            let next = frame.withUnsafeBytes { $0.loadUnaligned(as:UInt64.self) }
-            let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset:8,as:UInt64.self) }
-            let deadline = Double(expiry) / 1_000_000_000, now = safetyTime()
-            guard next > sequence, deadline > now, deadline <= now+3.01 else { return false }
-            sequence = next; expires = deadline
-            guard frame.withUnsafeBytes({ Darwin.write(STDOUT_FILENO,$0.baseAddress,$0.count) }) == 16 else { return false }
-        }
-        return expires == 0 || safetyTime() < expires
-    }
-    let startup = safetyTime()+2
-    while expires == 0 && safetyTime()<startup && watchdogStop==0 && getppid()==parent {
-        guard receivePermit() else { exit(2) }; usleep(20_000)
-    }
-    guard expires>safetyTime(), watchdogStop==0, getppid()==parent else { exit(2) }
-    let process = Process(); process.executableURL = URL(fileURLWithPath:args[4])
-    process.arguments = Array(args.dropFirst(5)); process.standardInput = FileHandle.nullDevice
-    let output = Pipe(); process.standardOutput = output; process.standardError = output
-    let fd = output.fileHandleForReading.fileDescriptor
-    _ = fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)
-    var logBytes = 0
-    func drain() {
-        var bytes = [UInt8](repeating:0,count:8192)
-        for _ in 0..<8 {
-            let count = Darwin.read(fd,&bytes,bytes.count); if count<=0 { return }
-            if logBytes+count>262144 { _ = ftruncate(STDERR_FILENO,0); _ = lseek(STDERR_FILENO,0,SEEK_SET); logBytes=0 }
-            try? FileHandle.standardError.write(contentsOf:Data(bytes.prefix(count))); logBytes += count
-        }
-    }
-    do { try process.run() } catch { fputs("公開用プロセスの起動失敗\n",stderr); exit(1) }
-    let directory = URL(fileURLWithPath:args[3])
-    if let data = try? JSONSerialization.data(withJSONObject:["watchdogPID":getpid(),"tunnelPID":process.processIdentifier,"parentPID":parent]) {
-        try? data.write(to:directory.appendingPathComponent("watchdog.json"),options:.atomic)
-    }
-    while process.isRunning && watchdogStop==0 && getppid()==parent {
-        if !receivePermit() { break }; drain(); usleep(50_000)
-    }
-    if process.isRunning { process.terminate() }
-    for _ in 0..<20 { drain(); if !process.isRunning { break }; usleep(100_000) }
-    if process.isRunning { kill(process.processIdentifier,SIGKILL) }
-    process.waitUntilExit(); drain()
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var onReady: (() -> Void)?
+    var onWillTerminate: (() -> Void)?
     let engine: Engine
     let headless: Bool
     private var window: NSWindow?
@@ -69,13 +13,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusTimer: Timer?
     private let uiSmoke: Bool
     private let uiPublicSmoke: Bool
-    private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke") || CommandLine.arguments.contains("--ui-exercise-smoke")
+    private let options: LaunchOptions
+    private var dashboardSmoke: Bool { options.dashboardSmoke }
     private var smokeStage = 0
     private var terminationPending = false
+    private var lastTestAction = ""
 
-    init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) {
-        self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke
-        engine.requiresUIHeartbeat = !headless
+    init(engine: Engine, options: LaunchOptions) {
+        self.options = options
+        self.engine = engine; self.headless = options.headless; self.uiSmoke = options.uiSmoke; self.uiPublicSmoke = options.uiPublicSmoke
+        engine.requiresUIHeartbeat = !options.headless
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -86,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { NSApp.terminate(nil) }
             source.resume(); sources.append(source)
         }
-        if headless { engine.start(publish: CommandLine.arguments.contains("--public")) }
+        if headless { engine.start(publish: CommandLine.arguments.contains("--public"), localExercise: options.testing && CommandLine.arguments.contains("--local-origin")); onReady?() }
         else { createWindow() }
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
@@ -113,9 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard.onExerciseStop = { [weak exercise] in exercise?.cancel() }
         dashboard.onReady = { [weak self] in
             guard let self else { return }
+            self.onReady?()
             if self.uiSmoke { self.dashboard?.testAction("local") }
             if self.uiPublicSmoke { self.dashboard?.testAction("public") }
-            if CommandLine.arguments.contains("--ui-exercise-smoke") { self.dashboard?.testAction("exercise") }
+            if options.exerciseSmoke { self.dashboard?.testAction("exercise") }
         }
         window.contentView = dashboard.webView
         self.dashboard = dashboard; self.window = window
@@ -127,19 +75,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard?.refresh()
         if dashboardSmoke {
             dashboard?.testState()
-            if CommandLine.arguments.contains("--ui-exercise-smoke"), let endpoint = engine.exerciseEndpoint {
+        }
+        if options.testing {
+            if let endpoint = engine.exerciseEndpoint {
                 engine.save(["host":endpoint.host],name:"test-origin.json")
             }
+            var state = engine.testingSnapshot
+            let native: [String:Any] = ["pid":getpid(),"windowMiniaturized":window?.isMiniaturized ?? false,
+                         "appHidden":NSApp.isHidden,"windowVisible":window?.isVisible ?? false,
+                         "appActive":NSApp.isActive,"activationPolicy":NSApp.activationPolicy().rawValue,
+                         "windowKey":window?.isKeyWindow ?? false,"windowNumber":window?.windowNumber ?? 0,
+                         "windowStyle":window?.styleMask.rawValue ?? 0,
+                         "minimizeEnabled":window?.standardWindowButton(.miniaturizeButton)?.isEnabled ?? false,
+                         "lastAction":lastTestAction]
+            state.merge(native) { _,new in new }
+            if let number = window?.windowNumber,
+               let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow,CGWindowID(number)) as? [[String:Any]],
+               let bounds = windows.first?[kCGWindowBounds as String] as? [String:Any] {
+                state["windowServerBounds"] = bounds
+            }
+            state["stageManagerEnabled"] = UserDefaults(suiteName:"com.apple.WindowManager")?.bool(forKey:"GloballyEnabled") ?? false
+            engine.save(state,name:"background-state.json")
             let command = engine.directory.appendingPathComponent("ui-command")
             if let value = try? String(contentsOf: command, encoding: .utf8) {
                 try? FileManager.default.removeItem(at: command)
+                lastTestAction = value.trimmingCharacters(in:.whitespacesAndNewlines)
                 switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
+                case "local-origin": engine.start(publish:false,localExercise:true)
+                case "minimize": window?.performMiniaturize(nil)
+                case "restore": window?.deminiaturize(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
+                case "hide": NSApp.hide(nil)
+                case "show": NSApp.unhide(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
+                case "stop":
+                    if dashboardSmoke { dashboard?.testAction("stop") }
+                    else { engine.stop(reason:"検証からの停止") }
                 case "capture": dashboard?.capture(to: engine.directory.appendingPathComponent("ui-capture.png"))
                 case "resize": window?.setContentSize(NSSize(width: 860, height: 650))
                 case "quit": NSApp.terminate(nil)
-                case "freeze-main": Thread.sleep(forTimeInterval:5)
-                case "freeze-ui": dashboard?.testFreezeUI()
-                case let action: dashboard?.testAction(action)
+                case "freeze-main": if dashboardSmoke { Thread.sleep(forTimeInterval:5) }
+                case "freeze-ui": if dashboardSmoke { dashboard?.testFreezeUI() }
+                case let action: if dashboardSmoke { dashboard?.testAction(action) }
                 }
             }
         }
@@ -154,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        if uiPublicSmoke, engine.phase == "公開中", smokeStage == 0 {
+        if uiPublicSmoke, ["公開中","公開URL取得済み"].contains(engine.phase), smokeStage == 0 {
             smokeStage = 1
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.dashboard?.capture(to: self.engine.directory.appendingPathComponent("ui-public.png")) { NSApp.terminate(nil) }
@@ -181,6 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateCancel
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) {
+        if engine.shutdownComplete { onWillTerminate?() }
+    }
 }
 
 @main struct HoneyObs {
@@ -188,21 +166,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         umask(0o077)
         signal(SIGPIPE, SIG_IGN)
         let args = CommandLine.arguments
-        if args.contains("--watchdog") { watchdog(args); return }
-        let headless = args.contains("--headless")
-        let directory: URL
-        if let i = args.firstIndex(of: "--run-directory"), i+1 < args.count { directory = URL(fileURLWithPath: args[i+1]) }
-        else {
-            directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("HoneyObs/検証/" + UUID().uuidString)
-        }
         do {
-            let engine = try Engine(directory: directory, resources: Bundle.main.resourceURL!)
-            let delegate = AppDelegate(engine: engine, headless: headless, uiSmoke: args.contains("--ui-smoke"), uiPublicSmoke: args.contains("--ui-public-smoke"))
+            let options = try LaunchOptions(arguments: args)
+            if args.contains("--test-egress-fixture") {
+                guard options.testing else { throw NSError(domain:"HoneyObs.EgressFixture",code:1,userInfo:[NSLocalizedDescriptionKey:"通信VMの模擬接続には検証モードが必要です"]) }
+                #if !EGRESS_TESTING
+                throw NSError(domain:"HoneyObs.EgressFixture",code:1,userInfo:[NSLocalizedDescriptionKey:"通信VMの模擬接続は検証専用ビルドだけで使用できます"])
+                #endif
+            }
+            if !args.contains("--session-client") {
+                exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args, directory: options.directory))
+            }
+            let ownership = try SessionClient(arguments: args, directory: options.directory)
+            let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets, requireManagedArchive:!options.testing)
+            #if EGRESS_TESTING
+            if args.contains("--test-egress-fixture") { try engine.enableEgressTestingFixture() }
+            #endif
+            ownership.requiresRecovery = { engine.requiresSessionRecovery }
+            ownership.onRevoke = { engine.stop(reason: "OS監視の確認期限切れ") }
+            let delegate = AppDelegate(engine: engine, options: options)
+            delegate.onReady = { [weak ownership] in ownership?.markUIReady() }
+            delegate.onWillTerminate = { [weak ownership] in ownership?.finish() }
             let application = NSApplication.shared
-            application.setActivationPolicy(headless ? .prohibited : .regular)
+            application.setActivationPolicy(options.headless ? .prohibited : .regular)
             application.delegate = delegate
-            withExtendedLifetime(delegate) { application.run() }
+            withExtendedLifetime((delegate, ownership)) {
+                application.run()
+                if engine.shutdownComplete { ownership.finish() }
+            }
         } catch { fputs("起動失敗: \(error)\n",stderr); exit(1) }
     }
 }

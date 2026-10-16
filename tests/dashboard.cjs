@@ -67,6 +67,10 @@ const fixture = {
     }
     await page.evaluate(s=>window.honeyobs.update(s),{...fixture,active:false,canStart:true,shutdownComplete:true,phase:'停止完了'});
     assert.equal(await page.locator('#vm-status').textContent(),'内蔵VM：停止確認済み');
+    for (const [finalization,label] of [['confirmed','確定'],['partial','部分取得'],['unverified','未確認']]) {
+      await page.evaluate(s=>window.honeyobs.update(s),{...fixture,observation:{finalization},active:false,shutdownComplete:true});
+      assert((await page.locator('#observation-status').textContent()).includes('最終観測: '+label));
+    }
     await page.evaluate(s=>window.honeyobs.update(s),{...fixture,session:'new-session',events:[],total:0});
     assert.equal(await page.locator('.event').count(),0);
     assert.equal(await page.locator('#request').textContent(),'—');

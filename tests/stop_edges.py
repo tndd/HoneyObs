@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""実アプリの起動中終了と監視役異常終了時の誤った完了表示を検査する。"""
+"""起動中の終了と、OS監視job故障による実VM回収を検査する（外部公開なし）。"""
 import json
 import os
 import signal
 import subprocess
-from integration import APP, OUT, Session, read, wait, alive
+from integration import APP, OUT, Session, read, wait, alive, bootout_owned
+from qa_registry import register_app
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     report = {}
     directory = OUT / 'terminate-starting'
-    directory.mkdir()
+    directory.mkdir(mode=0o700)
     with (directory / 'app.log').open('w') as log:
-        process = subprocess.Popen([str(APP), '--headless', '--run-directory', str(directory)], stdout=log, stderr=log)
+        register_app(APP.parents[2])
+        process = subprocess.Popen([str(APP), '--test-mode', '--headless', '--run-directory', str(directory)], stdout=log, stderr=log)
         try:
             wait(lambda: read(directory / 'state.json').get('active') is True)
             process.terminate()
@@ -22,27 +24,29 @@ def main():
             assert process.returncode == 0 and state['shutdownComplete'] and not state['vmPresent'], state
             report['applicationTerminationWaitsForVM'] = 'PASS'
         finally:
+            bootout_owned(directory)
             if process.poll() is None:
-                process.kill()
-                process.wait()
+                process.kill(); process.wait()
 
-    session = Session('watchdog-loss', public=True)
+    session = Session('monitor-loss', local_origin=True)
     try:
-        guard = wait(lambda: read(session.directory / 'watchdog.json'))
-        os.kill(guard['watchdogPID'], signal.SIGKILL)
-        state = wait(lambda: s if (s := read(session.directory / 'state.json')).get('phase') == '停止失敗' else None, 12)
-        assert state['active'] is False and state['vmPresent'] is False, state
-        assert state['shutdownComplete'] is False and state['canStart'] is False, state
-        # 回収未確認を報告することがこの段階の契約。監視役故障からの全回収を証明したとはしない。
-        report['watchdogCrashIsNotReportedAsStopped'] = 'PASS'
-        report['tunnelAliveBeforeTestCleanup'] = alive(guard['tunnelPID'])
+        state = session.ready()
+        owner = wait(lambda: read(session.directory / 'owner.json'))
+        monitor = owner['ownerPID']
+        current = subprocess.check_output(['ps', '-p', str(monitor), '-o', 'command='], text=True).strip()
+        app = APP.parent.parent
+        assert str(app / 'Helpers/HoneyObsSession') in current and '--monitor-job' in current, current
+        os.kill(monitor, signal.SIGKILL)
+        wait(lambda: not alive(owner['clientPID']) and all(not alive(pid) for pid in session.vz_helpers), 8)
+        for field in ['ownerService', 'clientService']:
+            wait(lambda: subprocess.run(['/bin/launchctl', 'print', owner[field]], capture_output=True).returncode != 0, 5)
+        report['monitorCrashRecoversDirectVZOwner'] = 'PASS'
+        report['ownedVZHelpersGoneBeforeTestCleanup'] = True
         report['observedBeforeCleanup'] = True
     finally:
         session.cleanup()
-        guard = read(session.directory / 'watchdog.json')
-        wait(lambda: not alive(guard.get('watchdogPID')) and not alive(guard.get('tunnelPID')), 5)
     (OUT / 'stop-edges-report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
-    print('実アプリの終了待機・監視役異常終了の未確認表示: PASS')
+    print('起動中の終了・OS監視故障からの実VM回収: PASS')
     print('検証記録:', OUT)
 
 

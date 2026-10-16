@@ -11,20 +11,36 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private(set) var publicURL = ""
     private(set) var detail = ""
     private var machine: VZVirtualMachine?
-    private var console: FileHandle?
+    private var console: BoundedConsole?
+    private var consoleClosing = false
+    private var guestReads: [UUID:GuestRead] = [:]
+    private var finalDrain: ObservationDrain?
+    private var finalObservation: [String:Any] = ["status":"unverified","unconfirmedTail":true]
+    private var archiveSession: SessionArchive?
     private var listener: NWListener?
     private var sessions: [UUID: Relay] = [:]
     private var pending: [UUID: NWConnection] = [:]
-    private var supervisor: Process?
+    private var cancellingClients: [ObjectIdentifier:NWConnection] = [:]
+    #if EGRESS_TESTING
+    var egressTestHandler: ((UInt32, VZVirtioSocketConnection, @escaping () -> Void) -> Void)?
+    private var egressFixture: EgressTestingFixture?
+    var egressFixtureStatus: [String:Any] { egressFixture?.status ?? [:] }
+    func enableEgressTestingFixture() throws {
+        guard testing, !active else { throw NSError(domain:"HoneyObs.EgressFixture",code:1) }
+        let fixture = try EgressTestingFixture(originPort:{[weak self] in self?.localPort ?? 0})
+        egressFixture = fixture
+        egressTestHandler = { [weak fixture] port, connection, finished in
+            guard let fixture else { connection.close(); finished(); return }
+            fixture.handle(port,connection:connection,finished:finished)
+        }
+    }
+    #endif
+    private var egress: EgressVM?
+    private var egressStopRequested = false
+    private var stopVMsStarted = false
+    private var finalDrainStarted = false
     private var permit: ForwardingPermit?
     private var permitTimer: Timer?
-    private var leaseWriter: FileHandle?
-    private var leaseReader: FileHandle?
-    private var ackBytes = Data()
-    private var leaseSequence: UInt64 = 0
-    private var ackSequence: UInt64 = 0
-    private var guardianDeadline = 0.0
-    private var guardianStarted = 0.0
     private var guestConfirmed = 0.0
     private var uiConfirmed = 0.0
     var requiresUIHeartbeat = false
@@ -42,7 +58,6 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var localPort: UInt16 = 0
     private var tunnelStarted = false
     private var diagnosticsStarted = false
-    private var publicCheckStarted = Date()
     private var snapshot: [String: Any] = [:]
     private var sleepObserver: NSObjectProtocol?
     private var stopTimer: Timer?
@@ -51,51 +66,104 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var stopRequested = false
     private var stopping = false
     private var stopFailed = false
-    private var supervisorUnconfirmed = false
     private var runError: String?
     private var stopCallbacks: [(Bool) -> Void] = []
     private var lastGuestReply = 0.0
-    private var publicSession: URLSession?
     private let stopLimit: TimeInterval
     private let healthLimit: TimeInterval
     private let stopMachine: (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void
     private let readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)?
+    private let testing: Bool
+    private let probeTargets: String
+    var requiresSessionRecovery: Bool { stopFailed || (egress?.requiresSessionRecovery ?? false) }
     private var observations = ObservationStore()
     private var lastArchive = Data()
     private var hostRejections: [String: ObservationStore.Rejection] = [:]
     private(set) var events: [ObservedEvent] = []
     private(set) var sessionID = UUID().uuidString
     var shutdownComplete: Bool {
-        !active && !stopping && !stopFailed && !supervisorUnconfirmed && machine == nil &&
-        supervisor == nil && listener == nil && sessions.isEmpty && pending.isEmpty
+        !active && !stopping && !stopFailed && machine == nil &&
+        egress == nil && console == nil && guestReads.isEmpty && finalDrain == nil && listener == nil && sessions.isEmpty && pending.isEmpty && cancellingClients.isEmpty
     }
     var canStart: Bool { shutdownComplete }
     var isActive: Bool { active }
     var isLocalExercise: Bool { localExercise }
+    var testingSnapshot: [String:Any] {
+        guard testing else { return [:] }
+        return ["safetyNow":safetyTime(),"guestConfirmedAt":guestConfirmed,"uiConfirmedAt":uiConfirmed,
+                "permitDeadline":permit?.deadline ?? 0,"permitValid":permit?.valid ?? false]
+    }
 
-    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5,
+    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "", requireManagedArchive: Bool = false,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
          readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil) throws {
-        self.directory = directory; self.resources = resources
+        self.directory = directory; self.resources = resources; self.testing = testing; self.probeTargets = probeTargets
         self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
         self.readGuest = readGuest
         super.init()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if requireManagedArchive {
+            archiveSession = try SessionArchive(directory:directory)
+        }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.stop(reason: "スリープ通知")
         }
+        try archiveSession?.setClosed(true)
+        update()
     }
 
-    func save(_ object: Any, name: String) {
+    @discardableResult func save(_ object: Any, name: String) -> Bool {
         do {
             let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+            try archiveSession?.checkWrite(bytes:data.count,name:name)
             try data.write(to: directory.appendingPathComponent(name), options: .atomic)
-        } catch { detail = "保存失敗: \(error.localizedDescription)" }
+            return true
+        } catch {
+            detail = "保存失敗: \(error.localizedDescription)"
+            if active, runError == nil {
+                runError = detail
+                DispatchQueue.main.async { [weak self] in self?.stop(reason:"記録を保存できないため停止します") }
+            }
+            return false
+        }
+    }
+
+    @discardableResult private func requestGuest(_ vm:VZVirtualMachine,path:String,completion:@escaping (Result<Data,Error>)->Void) -> UUID {
+        let id = UUID()
+        guestReads[id] = guestRequest(vm,path:path) { [weak self] result in
+            // connect失敗が同期応答でも、辞書への代入より後に回収する。
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.guestReads.removeValue(forKey:id); completion(result); self.advanceStop()
+            }
+        }
+        return id
+    }
+    private func closeConsole() {
+        guard let console, !consoleClosing else { return }; consoleClosing = true
+        console.close { [weak self, weak console] in
+            guard let self, self.console === console else { return }
+            self.console = nil; self.consoleClosing = false; self.advanceStop()
+        }
+    }
+    // Relayへ渡さなかった接続も、Network.frameworkの取消完了まで所有する。
+    private func cancelClient(_ client:NWConnection) {
+        if case .cancelled = client.state { return }
+        let id = ObjectIdentifier(client)
+        guard cancellingClients[id] == nil else { return }
+        cancellingClients[id] = client
+        client.stateUpdateHandler = { [weak self] state in
+            guard case .cancelled = state, let self else { return }
+            self.cancellingClients.removeValue(forKey:id); self.advanceStop()
+        }
+        client.start(queue:.main); client.cancel()
     }
 
     private func update() {
         save(["phase": phase, "detail": detail, "url": publicURL, "pid": getpid(),
-              "supervisorPID": supervisor?.processIdentifier ?? 0, "originPort": localPort,
+              "supervisorPID": 0, "originPort": localPort,
+              "egressVMPresent": egress != nil, "egressHealthy": egress?.healthy ?? false,
+              "egressHealthAt": egress?.lastHealthAt ?? 0,
               "active": active, "vmPresent": machine != nil, "canStart": canStart,
               "shutdownComplete": shutdownComplete, "stopping": stopping, "networkDevices": 0, "sharedDirectories": 0,
               "storageDevices": 0, "time": ISO8601DateFormatter().string(from: Date())], name: "state.json")
@@ -109,7 +177,9 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     func start(publish: Bool, localExercise: Bool = false) {
         guard canStart else { return }
         self.localExercise = localExercise
-        permit = nil; guestConfirmed = 0; uiConfirmed = 0; leaseSequence = 0; ackSequence = 0; guardianDeadline = 0; ackBytes = Data()
+        do { try archiveSession?.setClosed(false) } catch { phase = "エラー"; detail = error.localizedDescription; update(); return }
+        finalObservation = ["status":"collecting","unconfirmedTail":true]
+        permit = nil; guestConfirmed = 0; uiConfirmed = 0; egressStopRequested = false; stopVMsStarted = false; finalDrainStarted = false
         active = true; wantsPublic = publish; publicURL = ""; detail = ""; phase = "VM起動中"
         runError = nil; lastGuestReply = ProcessInfo.processInfo.systemUptime
         generation = UUID(); let current = generation
@@ -128,9 +198,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
             let log = directory.appendingPathComponent("console.log")
-            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            console = try FileHandle(forWritingTo: log)
-            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!)
+            console = try BoundedConsole(url:log,onFailure:{ [weak self] error in self?.fail("VMログ保存失敗: " + error.localizedDescription) })
+            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!.writer)
             config.serialPorts = [serial]
             config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
             try config.validate()
@@ -154,7 +223,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func tick() {
         guard active, let machine else { return }
         let command = directory.appendingPathComponent("command")
-        if let value = try? String(contentsOf: command, encoding: .utf8) {
+        if testing, let value = try? String(contentsOf: command, encoding: .utf8) {
             try? FileManager.default.removeItem(at: command)
             if value.trimmingCharacters(in: .whitespacesAndNewlines) == "simulate-sleep" {
                 NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil); return
@@ -169,7 +238,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         readTunnelURL()
         guard !polling else { return }; polling = true
         let current = generation
-        let read = readGuest ?? { vm, done in guestRequest(vm, path: "/?after=\(self.observations.lastID)", completion: done) }
+        let read = readGuest ?? { vm, done in _ = self.requestGuest(vm,path:"/?after=\(self.observations.lastID)",completion:done) }
         read(machine) { [weak self] result in
             guard let self, self.active, self.generation == current else { return }
             self.polling = false
@@ -182,6 +251,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 try self.observations.ingest(data)
                 let archive = try self.observations.encoded()
                 if archive != self.lastArchive {
+                    try self.archiveSession?.checkWrite(bytes:archive.count,name:"events.json")
                     try archive.write(to: self.directory.appendingPathComponent("events.json"), options: .atomic)
                     self.lastArchive = archive
                 }
@@ -201,9 +271,9 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             if !self.diagnosticsStarted {
                 self.diagnosticsStarted = true
-                let extra = ProcessInfo.processInfo.environment["HONEYOBS_PROBE_TARGETS"] ?? ""
+                let extra = testing ? probeTargets : ""
                 let suffix = extra.split(separator: ",").map { "target=" + $0 }.joined(separator: "&")
-                guestRequest(machine, path: "/isolation?" + suffix) { result in
+                self.requestGuest(machine, path: "/isolation?" + suffix) { result in
                     guard self.active, self.generation == current else { return }
                     if case .success(let data) = result, let value = try? JSONSerialization.jsonObject(with: data) { self.save(value, name: "isolation.json") }
                 }
@@ -231,27 +301,32 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 guard self.active, self.generation == current else { return }
                 switch state {
                 case .ready:
-                    if let port = server?.port { self.localPort = port.rawValue; self.originReady() }
+                    if let port = server?.port {
+                        self.localPort = port.rawValue
+                        if self.testing { self.save(["host": self.originHost], name: "test-origin.json") }
+                        self.originReady()
+                    }
                 case .failed(let error): self.fail(error.localizedDescription)
                 default: break
                 }
             }
             server.newConnectionHandler = { [weak self] client in
-                guard let self, self.active, self.generation == current, permission.valid,
-                      let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { client.cancel(); return }
+                guard let self else { client.cancel(); return }
+                guard self.active, self.generation == current, permission.valid,
+                      let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { self.cancelClient(client); return }
                 guard self.pending.count + self.sessions.count < 8 else {
-                    self.recordHostRejection("connection_limit"); client.cancel(); return
+                    self.recordHostRejection("connection_limit"); self.cancelClient(client); return
                 }
                 let pendingID = UUID(); self.pending[pendingID] = client
                 device.connect(toPort: 7000) { result in
                     self.pending.removeValue(forKey: pendingID)
                     guard self.active, self.generation == current, permission.valid else {
-                        client.cancel()
+                        self.cancelClient(client)
                         if case .success(let guest) = result { guest.close() }
                         self.advanceStop(); return
                     }
                     switch result {
-                    case .failure: self.recordHostRejection("guest_connect"); client.cancel()
+                    case .failure: self.recordHostRejection("guest_connect"); self.cancelClient(client)
                     case .success(let guest):
                         let id = UUID()
                         let relay = Relay(client: client, guest: guest, permit: permission, rejected: { [weak self] reason in
@@ -277,105 +352,36 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         guard active, let permit else { return }
         let confirmed = requiresUIHeartbeat ? min(guestConfirmed, uiConfirmed) : guestConfirmed
         guard permit.renew(confirmedAt: confirmed) else { fail("転送許可の期限切れにより停止します"); return }
-        guard let writer = leaseWriter, let reader = leaseReader else { return }
-        var buffer = [UInt8](repeating: 0, count: 512)
-        let count = Darwin.read(reader.fileDescriptor, &buffer, buffer.count)
-        if count == 0 { fail("監視役との確認通信が切断されました"); return }
-        if count > 0 { ackBytes.append(contentsOf: buffer.prefix(count)) }
-        while ackBytes.count >= 16 {
-            let frame = Data(ackBytes.prefix(16)); ackBytes.removeFirst(16)
-            let sequence = frame.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
-            let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
-            guard sequence > ackSequence, sequence <= leaseSequence else { fail("監視役の確認番号が不正です"); return }
-            ackSequence = sequence; guardianDeadline = Double(expiry) / 1_000_000_000
-        }
-        if safetyTime() - guardianStarted > 1, guardianDeadline <= safetyTime() {
-            fail("監視役の応答期限を超えたため転送を停止します"); return
-        }
-        leaseSequence += 1
-        var sequence = leaseSequence, expiry = UInt64(permit.deadline * 1_000_000_000)
-        var frame = withUnsafeBytes(of: &sequence) { Data($0) }
-        frame.append(withUnsafeBytes(of: &expiry) { Data($0) })
-        let written = frame.withUnsafeBytes { Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) }
-        if written != frame.count { fail("監視役への転送許可を送れません") }
     }
 
     private func startTunnel() {
-        guard supervisor == nil else { return }
-        let log = directory.appendingPathComponent("tunnel.log")
-        FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        let config = directory.appendingPathComponent("tunnel.yml")
-        // 利用者の既存cloudflared設定を読み込まない。
-        try? Data("{}\n".utf8).write(to: config)
-        let process = Process(); process.executableURL = Bundle.main.executableURL
-        process.environment = ["PATH": "/usr/bin:/bin"]
-        process.arguments = ["--watchdog", String(getpid()), directory.path, resources.appendingPathComponent("cloudflared").path,
-                             "tunnel", "--config", config.path, "--no-autoupdate", "--url", "http://127.0.0.1:\(localPort)",
-                             "--http-host-header", originHost, "--protocol", "http2", "--metrics", "127.0.0.1:0"]
-        let handle = try? FileHandle(forWritingTo: log)
-        let leases = Pipe(), acknowledgements = Pipe()
-        process.standardInput = leases; process.standardOutput = acknowledgements; process.standardError = handle
-        leaseWriter = leases.fileHandleForWriting; leaseReader = acknowledgements.fileHandleForReading
-        for fd in [leaseWriter!.fileDescriptor, leaseReader!.fileDescriptor] { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
-        guardianStarted = safetyTime()
-        process.terminationHandler = { [weak self] exited in
-            DispatchQueue.main.async {
-                guard let self, self.supervisor === exited else { return }
-                self.supervisor = nil
-                try? self.leaseWriter?.close(); self.leaseWriter = nil
-                try? self.leaseReader?.close(); self.leaseReader = nil
-                // 監視役の正常終了は子のwaitUntilExit後だけ。異常終了では回収を推測しない。
-                if exited.terminationReason != .exit || exited.terminationStatus != 0 {
-                    self.supervisorUnconfirmed = true
-                }
-                if self.active { self.fail("公開用プロセスが終了しました") }
-                else { self.advanceStop(); self.update() }
+        guard egress == nil, let permit, permit.valid else { fail("通信VMの転送許可がありません"); return }
+        let current = generation
+        let communication = EgressVM(resources: resources, directory: directory, originPort: localPort, originHost: originHost, permit: permit) { [weak self] message in
+            guard let self else { return }
+            if self.active { self.fail(message) } else { self.advanceStop() }
+        }
+        #if EGRESS_TESTING
+        communication.testHandler = egressTestHandler
+        #endif
+        egress = communication; phase = "通信VM起動中"; update()
+        communication.start { [weak self, weak communication] result in
+            guard let self, let communication, self.egress === communication else { return }
+            guard self.active, self.generation == current else { self.advanceStop(); return }
+            switch result {
+            case .failure(let error): self.fail(error.localizedDescription)
+            case .success:
+                self.phase = "公開接続中"; self.detail = "通信VMの準備完了。外部からの到達は未確認です"
+                self.readTunnelURL(); self.update()
             }
         }
-        do {
-            try process.run(); supervisor = process
-            try? leases.fileHandleForReading.close(); try? acknowledgements.fileHandleForWriting.close()
-            maintainPermit(); if active { phase = "公開接続中"; update() }
-        }
-        catch { fail(error.localizedDescription) }
-        try? handle?.close()
     }
 
     private func readTunnelURL() {
-        guard wantsPublic, publicURL.isEmpty,
-              let log = try? String(contentsOf: directory.appendingPathComponent("tunnel.log"), encoding: .utf8),
-              let range = log.range(of: "https://[a-z0-9-]+\\.trycloudflare\\.com", options: .regularExpression) else { return }
-        publicURL = String(log[range]); phase = "公開URL確認中"; update()
-        publicCheckStarted = Date()
-        checkPublicURL()
-    }
-
-    private func checkPublicURL() {
-        let current = generation
-        let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 8
-        let session = URLSession(configuration: config)
-        publicSession = session
-        session.dataTask(with: URL(string: publicURL + "/honeyobs-test-ready")!) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self, self.active, self.generation == current else { return }
-                self.publicSession = nil
-                if let response = response as? HTTPURLResponse, response.statusCode == 404,
-                   data == Data("Not found\n".utf8) {
-                    self.phase = "公開中"; self.detail = "公開URL経由でVMの応答を確認"
-                } else {
-                    if Date().timeIntervalSince(self.publicCheckStarted) < 180 {
-                        self.detail = "公開経路の準備を待っています"
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                            if self.active, self.generation == current { self.checkPublicURL() }
-                        }
-                    } else {
-                        self.fail("公開URL経由でVMの応答を確認できませんでした: " + (error?.localizedDescription ?? "応答不一致"))
-                    }
-                }
-                self.update()
-            }
-            session.finishTasksAndInvalidate()
-        }.resume()
+        let acquiredURL = egress?.publicURL ?? ""
+        guard wantsPublic, publicURL.isEmpty, !acquiredURL.isEmpty else { return }
+        publicURL = acquiredURL; phase = "公開URL取得済み"
+        detail = "通信VMで一時公開URLを取得しました。外部からの到達は未確認です"; update()
     }
 
     func stop(reason: String, completion: ((Bool) -> Void)? = nil) {
@@ -383,25 +389,41 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         if let completion { stopCallbacks.append(completion) }
         guard !stopping else { return }
         active = false; generation = UUID(); phase = "停止処理中"; detail = reason
-        stopping = true; stopFailed = false; stopRequested = false
+        stopping = true; stopFailed = false; stopRequested = false; egressStopRequested = false; stopVMsStarted = false; finalDrainStarted = false
         permit?.revoke(); permitTimer?.invalidate(); permitTimer = nil
-        try? leaseWriter?.close(); leaseWriter = nil
         stopAttempt = UUID(); stopStarted = ProcessInfo.processInfo.systemUptime
         timer?.invalidate(); timer = nil
-        publicSession?.invalidateAndCancel(); publicSession = nil
         listener?.cancel()
-        for client in pending.values { client.cancel() }
+        for client in pending.values { cancelClient(client) }
         for relay in sessions.values { relay.cancel() }
-        supervisor?.terminate()
+        for read in guestReads.values { read.cancel() }
         stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
         update(); advanceStop()
     }
 
     private func advanceStop() {
         guard stopping else { return }
-        if let vm = machine {
+        if !stopVMsStarted {
+            if listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty, !finalDrainStarted {
+                finalDrainStarted = true; let attempt = stopAttempt
+                drainFinalObservations { [weak self] in
+                    guard let self, self.stopping, self.stopAttempt == attempt else { return }
+                    self.stopVMsStarted = true; self.advanceStop()
+                }
+            }
+        } else if let communication = egress, !egressStopRequested {
+            egressStopRequested = true; let attempt = stopAttempt
+            communication.stop { [weak self, weak communication] confirmed in
+                guard let self, let communication, self.stopping, self.stopAttempt == attempt, self.egress === communication else { return }
+                guard confirmed, communication.shutdownComplete else {
+                    self.finishStop(error: "通信VMの停止完了を確認できません。再開できません"); return
+                }
+                self.egress = nil; self.advanceStop()
+            }
+        }
+        if stopVMsStarted, let vm = machine {
             if vm.state == .stopped, !stopRequested {
-                machine = nil; console = nil
+                machine = nil; closeConsole()
             } else if vm.canStop, !stopRequested {
                 stopRequested = true
                 let attempt = stopAttempt
@@ -413,28 +435,65 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                         guard vm.state == .stopped else {
                             self.finishStop(error: "VMの停止完了を確認できません"); return
                         }
-                        self.machine = nil; self.console = nil; self.advanceStop()
+                        self.machine = nil; self.closeConsole(); self.advanceStop()
                     }
                 }
                 // テスト用の同期応答を含め、失敗後に完了へ上書きしない。
                 guard stopping else { return }
             }
         }
-        if machine == nil, listener == nil, sessions.isEmpty, pending.isEmpty, supervisor == nil {
-            finishStop(error: supervisorUnconfirmed ? "監視役が異常終了したためトンネルの回収は未確認です。再開できません" : nil)
+        if machine == nil { closeConsole() }
+        if stopVMsStarted, machine == nil, console == nil, guestReads.isEmpty, egress == nil, listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty {
+            finishStop(error: nil)
         } else if ProcessInfo.processInfo.systemUptime - stopStarted >= stopLimit {
             finishStop(error: "停止期限を超えました。終了未確認のため再開できません")
         }
     }
 
+    // 入口と処理中Relayが閉じた後、両VMを止める前の差込箇所。
+    // 統合側はここでfinalize=1と最大0.5秒の最終観測取得を行う。
+    private func drainFinalObservations(completion: @escaping () -> Void) {
+        guard let vm = machine, vm.state == .running else {
+            finalObservation = ["status":"unverified","unconfirmedTail":true,"reason":"VM応答不可"]
+            saveFinalObservation(); completion(); return
+        }
+        let attempt = stopAttempt
+        let drain = ObservationDrain(store:observations,budget:min(0.5,stopLimit/4),request:{ [weak self] path,reply in
+            guard let self else { return {} }
+            let id = self.requestGuest(vm,path:path,completion:reply)
+            return { [weak self] in self?.guestReads[id]?.cancel() }
+        },persist:{ [weak self] data in
+            guard let self else { return }
+            try self.archiveSession?.checkWrite(bytes:data.count,name:"events.json")
+            try data.write(to:self.directory.appendingPathComponent("events.json"),options:.atomic)
+            self.lastArchive = data
+        },completed:{ [weak self] receipt in
+            guard let self, self.stopAttempt == attempt else { return }
+            self.finalDrain = nil; self.finalObservation = receipt
+            self.events = Array(self.observations.events.suffix(128)); self.saveFinalObservation()
+            if self.stopping { completion() }
+        })
+        finalDrain = drain; drain.start()
+    }
+    private func saveFinalObservation() {
+        var receipt = finalObservation; receipt["session"] = sessionID
+        if !save(receipt,name:"final-observation.json") {
+            finalObservation["status"] = "partial"; finalObservation["unconfirmedTail"] = true
+            finalObservation["reason"] = "最終観測のreceiptを保存できません"
+        }
+        saveObservationStatus()
+    }
+
     private func finishStop(error: String?) {
         guard stopping else { return }
         stopTimer?.invalidate(); stopTimer = nil; stopping = false
+        finalDrain?.cancel(); finalDrain = nil
         stopFailed = error != nil
         if let error { phase = "停止失敗"; detail = error }
         else { phase = runError == nil ? "停止完了" : "エラー"; if let runError { detail = runError } }
         let callbacks = stopCallbacks; stopCallbacks.removeAll()
         let confirmed = shutdownComplete
+        if confirmed { do { try archiveSession?.setClosed(true) } catch { detail = "保存終了情報の記録失敗: " + error.localizedDescription } }
         update()
         for callback in callbacks { callback(confirmed) }
     }
@@ -447,7 +506,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         guard machine === virtualMachine else { return }
         // このdelegate通知はVMが停止したことを示す。単なるstop失敗とは区別する。
-        machine = nil; console = nil
+        machine = nil; closeConsole()
         if active { fail(error.localizedDescription) } else { advanceStop() }
     }
     var eventCount: UInt64 { observations.total }
@@ -457,7 +516,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             rejected[reason] = ["count": value.count, "lastTime": value.lastTime]
         }
         return ["retained": observations.events.count, "uncollected": observations.uncollected,
-                "evicted": observations.evicted, "pending": observations.pending, "rejections": rejected]
+                "evicted": observations.evicted, "pending": observations.pending, "rejections": rejected,
+                "finalization":finalObservation["status"] ?? "unverified", "finalObservation":finalObservation]
     }
     private func saveObservationStatus() { save(observationStatus, name: "observation.json") }
     private func recordHostRejection(_ reason: String) {

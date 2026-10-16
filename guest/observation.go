@@ -110,6 +110,8 @@ type observingConn struct {
 	received bool
 	timedOut bool
 	status   string
+	tracked  bool
+	closed   bool
 }
 
 func (c *observingConn) Read(p []byte) (int, error) {
@@ -142,7 +144,8 @@ func (l *observingListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &observingConn{Conn: c}, nil
+	observationConnections.Add(1)
+	return &observingConn{Conn: c, tracked: true}, nil
 }
 func observationContext(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connectionKey{}, c)
@@ -157,6 +160,13 @@ func observationState(conn net.Conn, state http.ConnState) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	if c.tracked {
+		defer observationConnections.Done()
+	}
 	if c.handled || !c.received {
 		return
 	}

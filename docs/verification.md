@@ -1,4 +1,30 @@
-# 内蔵VM・一時公開の技術検証結果
+# 検証記録
+
+## 現行の2VM・OS所有構成（2026-10-17）
+
+この節が現行構成の記録である。後続の2026-10-15〜17の節は各時点の構成の履歴であり、旧host cloudflaredの公開成功を新しい通信VMの外部経路成功へ読み替えない。
+
+対象はApple Silicon・macOS 15.8.1・Swift 6.2.4、製品ソース `14a90d5`、0.3.0 build 4のローカル署名版。後続の変更は試験ハーネス・導入スクリプト・CI・文書である。
+
+| 検証 | 結果と証拠 |
+| --- | --- |
+| 実Mac一括ゲート | `bash scripts/local_vm_gate.sh` 合格。ビルド、深い署名、同梱資産、制御CLI、独立ジョブ、localhost隔離、停止API故障、権限制限、通信VM、Relay取消、最終観測、所有故障、自己ペネ、背景動作を実行 |
+| 自己ペネと記録照合 | 20ケース、160要求の一括送信、低速接続の上限・拒否・回復を確認。`test-results/self-pentest-20261017-035355-9741ed/report.json` |
+| 停止直前の記録 | seedと末尾128件を全ページ取得し、応答・ID・パス・本文SHAを照合。未完了Relayも停止し、フェンス成立・保存成功・未確認末尾なし。停止完了816ms、VZ helper消滅886ms。`test-results/final-observation-20261017-035219/report.json` |
+| 単一故障と独立OS観測 | 通常終了、UI/監視役のKILL/STOP、起動中STOP、両VZ helperのKILL/STOPの全10ケース合格。cleanup前にジョブ・PID生成時刻・helper・IPCを確認。`test-results/session-ownership-20261017-035232/report.json` |
+| 期限後の追加要求 | 上記に加えてUI/監視役のKILL/STOP各4ケースで3.260秒後のnonce付き新規HTTPと既存POST残本文へ応答なし。`test-results/session-ownership-20261017-035544/report.json` |
+| 権限と固定通信境界 | 実Linux VMでGoの複数スレッド・exec後もNoNewPrivs/seccompが維持されることを確認。通信VMのNIC・共有・ディスクなし、禁止経路拒否、固定localhost偽API/edge経由の2VM疎通と停止が合格。実Cloudflare TLSは未実施 |
+| 背景動作 | 最小化・Stage Managerの縮小表示・非表示でも余分なJS評価なしでfreshnessを維持し、復帰後とOFF後のVZ回収を確認。`test-results/app-background-20261017-035501-b68130/report.json` |
+| 画面と主スレッドの停止 | 同一build 4の私有コピーで、main 5秒停止とJS無限ループの2件が合格。3.25秒後の新規HTTP・既存POST残本文に応答なし。TCP EOFは2.189秒/2.975秒。停止後の非復活、JS停止中のnative応答、通常終了とjob/VM回収を確認。`test-results/permit-faults-20261017-040026/report.json` |
+| 通常の導入済みアプリ | `~/Applications/HoneyObs.app` を `/tmp` からLaunch Services起動し、repo非参照、同梱資産、採用アイコン、20ケース完走・途中中止・IP偽装後の中止と画面復帰が合格。完了・中止の実WKWebView画像を目視確認。`test-results/installed-app-20261017-035612/report.json` |
+| 試験フラグなしの通常起動 | 起動先が導入済み.appであること、実行中アイコンの128px画素一致、regularアプリ1個、重複openで同一PID、通常Quit後の両job/IPC消滅、再起動を確認。再起動後は公開せずidle表示。初期launcherと実UIを区別するためEngine state・所有clientPID・NSRunningApplicationの一致を待つ。`test-results/installed-normal-20261017-0405/report.json` |
+| 単体とPlaywright | `bash tests/unit.sh`、`npm test`、`node tests/live_dashboard.cjs` 合格。期限、遅着、取得失敗、保存容量・排他、console上限、導入/復旧12件、QA登録の対象限定5件、右下shield・中止・縮小画面・通信なしを確認 |
+
+3秒は許可の期限でありTCP切断期限ではない。全10ケースのUI SIGSTOPではEOF 4.022秒、VZ helper STOPの全回収は最大16.594秒だった。期限後の追加要求拒否、EOF、全OS資源回収を別の測定として残し、「3秒／8秒で全プロセス消滅」とは扱わない。すでにOSへ渡したデータの撤回、OS停止や信頼する全監視役の同時停止への無条件保証はない。
+
+実Cloudflare経路と独立した外部端末、実スリープ短/長・復帰、ログアウト、CPU/メモリ圧迫下の期限、VM/OSの未知脆弱性、一般配布は未回収である。Developer ID・公証・Gatekeeper・対応ソース提供を、開発署名やlocalhostの合格で代用しない。設計契約は [停止・隔離・観測の共通契約](safety-contract.md)、実行手順は [品質ゲート](quality-gates.md) を参照。
+
+## 初期の内蔵VM・一時公開の技術検証結果
 
 実施日：2026年10月15日（日本時間）
 

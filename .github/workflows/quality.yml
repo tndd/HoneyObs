@@ -1,0 +1,89 @@
+name: 品質検証
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      local_vm:
+        description: 専用の実Macでlocalhost VM検証を実行する
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  guest:
+    name: ゲストの競合検出
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: guest/go.mod
+          cache: false
+      - run: go test -race -count=1 ./...
+        working-directory: guest
+      - name: 通信VMのLinux ARM64ビルド
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+        working-directory: egress
+
+  dashboard:
+    name: Playwrightの画面検証
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: 自己ペネの応答表示・中止・完了後の復帰
+        run: node tests/live_dashboard.cjs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dashboard-browser
+          path: |
+            test-results/dashboard-browser
+            test-results/live-dashboard
+          retention-days: 7
+
+  swift:
+    name: VM非依存のSwiftと導入復旧
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: guest/go.mod
+          cache: false
+      - run: bash tests/unit.sh
+      - run: bash tests/egress.sh
+      - name: 製品Swiftの型検査
+        run: swiftc -swift-version 5 -typecheck -framework Cocoa -framework Virtualization -framework Network -framework WebKit Sources/HoneyObs/*.swift
+      - name: 開発署名と同梱資産の検査
+        run: |
+          bash scripts/build.sh
+          python3 scripts/check_bundle.py
+
+  local-vm:
+    name: 実Macのlocalhost VMゲート
+    if: github.event_name == 'workflow_dispatch' && inputs.local_vm
+    needs: [guest, dashboard, swift]
+    runs-on: [self-hosted, macOS, ARM64, honeyobs-vm]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: guest/go.mod
+          cache: false
+      - run: bash scripts/local_vm_gate.sh

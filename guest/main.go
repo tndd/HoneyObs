@@ -42,20 +42,31 @@ func (c vmConn) SetDeadline(t time.Time) error {
 	return c.SetWriteDeadline(t)
 }
 
-type vmListener struct{ fd int }
+type vmListener struct {
+	file *os.File
+	raw  syscall.RawConn
+}
 
 func (l *vmListener) Accept() (net.Conn, error) {
-	// Goのsyscall.AcceptはAF_VSOCKを変換できないため、アドレスなしでaccept4する。
-	n, _, e := syscall.Syscall6(syscall.SYS_ACCEPT4, uintptr(l.fd), 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
-	if e != 0 {
-		return nil, e
+	// sockaddr変換を避けつつ、Go netpollによってCloseで待機を解除する。
+	var n uintptr
+	var errno syscall.Errno
+	err := l.raw.Read(func(fd uintptr) bool {
+		n, _, errno = syscall.Syscall6(syscall.SYS_ACCEPT4, fd, 0, 0, syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0, 0)
+		return errno != syscall.EAGAIN && errno != syscall.EINTR
+	})
+	if err != nil {
+		return nil, err
+	}
+	if errno != 0 {
+		return nil, errno
 	}
 	return vmConn{os.NewFile(n, "vsock")}, nil
 }
-func (l *vmListener) Close() error   { return syscall.Close(l.fd) }
+func (l *vmListener) Close() error   { return l.file.Close() }
 func (l *vmListener) Addr() net.Addr { return vmAddr{} }
 func listenVM(port uint32) (*vmListener, error) {
-	fd, e := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	fd, e := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, 0)
 	if e != nil {
 		return nil, e
 	}
@@ -69,7 +80,13 @@ func listenVM(port uint32) (*vmListener, error) {
 		syscall.Close(fd)
 		return nil, e
 	}
-	return &vmListener{fd}, nil
+	file := os.NewFile(uintptr(fd), "vsock-listener")
+	raw, err := file.SyscallConn()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return &vmListener{file: file, raw: raw}, nil
 }
 
 func isolation(targets []string) map[string]any {
@@ -136,7 +153,13 @@ func control(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
-	json.NewEncoder(w).Encode(snapshot(after, os.Getuid()))
+	finalized := false
+	if r.URL.Query().Get("finalize") == "1" {
+		finalized = decoyFinalizer.finalize()
+	}
+	page := snapshot(after, os.Getuid())
+	page["finalized"] = finalized
+	json.NewEncoder(w).Encode(page)
 }
 
 func serve() {
@@ -151,11 +174,16 @@ func serve() {
 		s := &http.Server{Handler: v.handler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 4 * time.Second, WriteTimeout: 4 * time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096}
 		var listener net.Listener = l
 		if v.port == 7000 {
+			decoyFinalizer.server = s
 			listener = &observingListener{Listener: l}
 			s.ConnContext = observationContext
 			s.ConnState = observationState
 		}
-		go func() { log.Fatal(s.Serve(listener)) }()
+		go func() {
+			if err := s.Serve(listener); err != nil && err != http.ErrServerClosed {
+				log.Fatal(err)
+			}
+		}()
 	}
 	fmt.Println("HONEYOBS_READY uid=", os.Getuid())
 	select {}

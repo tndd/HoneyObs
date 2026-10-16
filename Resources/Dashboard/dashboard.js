@@ -164,7 +164,9 @@
       const observation = next.observation ?? {};
       const reasons = { permit_expired: '転送許可の失効', http_400: 'HTTP拒否400', http_431: 'ヘッダー上限', http_505: 'HTTP版不正', http_incomplete: 'HTTP未完了', http_timeout: 'HTTP読取期限', connection_limit: '接続数上限', guest_connect: 'VM接続失敗', relay_timeout: '中継期限', relay_input_limit: '中継入力上限' };
       const rejected = Object.entries(observation.rejections ?? {}).map(([key, value]) => `${reasons[key] ?? 'その他'} ${value.count}件`).join(' / ');
-      q('#observation-status').textContent = `保存 ${observation.retained ?? next.events.length} / 4096件 · 取得前の欠落 ${observation.uncollected ?? 0}件 · 保存上限による破棄 ${observation.evicted ?? 0}件 · 取得待ち ${observation.pending ?? 0}件${rejected ? ` · HTTP処理前／入口の拒否: ${rejected}` : ''}`;
+      const finalLabels = { collecting: '収集中', confirmed: '確定', partial: '部分取得', unverified: '未確認' };
+      const finalLabel = finalLabels[observation.finalization];
+      q('#observation-status').textContent = `保存 ${observation.retained ?? next.events.length} / 4096件 · 取得前の欠落 ${observation.uncollected ?? 0}件 · 保存上限による破棄 ${observation.evicted ?? 0}件 · 取得待ち ${observation.pending ?? 0}件${finalLabel ? ` · 最終観測: ${finalLabel}` : ''}${rejected ? ` · HTTP処理前／入口の拒否: ${rejected}` : ''}`;
       const increments = Object.entries(observation.rejections ?? {}).filter(([key, value]) => value.count > (rejectionCounts[key] ?? 0));
       let shieldTitle = '', shieldNote = '', shieldKind = 'received';
       if (increments.length) {

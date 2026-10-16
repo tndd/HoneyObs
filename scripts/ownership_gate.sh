@@ -1,0 +1,13 @@
+#!/bin/bash
+# 実外部経路を使わない専用variant。一度作った.appを後続試験で上書きしない。
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p test-results
+variant_root="$(mktemp -d "$PWD/test-results/ownership-build.XXXXXX")"
+variant_app="$variant_root/HoneyObs.app"
+codesign --verify --deep --strict build/HoneyObs.app
+/usr/bin/ditto build/HoneyObs.app "$variant_app"
+swiftc -swift-version 5 -D EGRESS_TESTING -framework Cocoa -framework Virtualization -framework Network -framework WebKit \
+  Sources/HoneyObs/*.swift -o "$variant_app/Contents/MacOS/HoneyObs"
+codesign --force --sign - --entitlements entitlements.plist "$variant_app"
+HONEYOBS_APP="$variant_app" python3 tests/session_ownership.py --egress-fixture

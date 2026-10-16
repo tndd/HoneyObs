@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """実VM・実公開経路を通す検証。公開したプロセスは失敗時も回収する。"""
 import argparse
+import re
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import time
 import uuid
+from qa_registry import register_app
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / 'build/HoneyObs.app/Contents/MacOS/HoneyObs'
@@ -39,6 +41,23 @@ def alive(pid):
     return bool(p.stdout.strip()) and not p.stdout.strip().startswith('Z')
 
 
+def xpc_helpers(pid):
+    domain = subprocess.run(['/bin/launchctl', 'print', 'pid/' + str(pid)], capture_output=True, text=True)
+    assert domain.returncode == 0 and f'creator = HoneyObs[{pid}]' in domain.stdout, domain.stdout
+    owned = re.findall(r'^\s+(\d+)\s+\S+\s+com\.apple\.Virtualization\.VirtualMachine\.[A-F0-9-]+\s*$', domain.stdout, re.M)
+    assert owned, '実VMのXPC所有を確認できません'
+    return [int(value) for value in owned]
+
+
+def bootout_owned(directory):
+    owner = read(directory / 'owner.json')
+    for field in ['clientService', 'ownerService']:
+        service = owner.get(field)
+        if service:
+            assert service.startswith('gui/' + str(os.getuid()) + '/local.honeyobs.'), service
+            subprocess.run(['/bin/launchctl', 'bootout', service], capture_output=True)
+
+
 def curl(url, *args):
     p = subprocess.run(['curl', '-4', '--http1.1', '--silent', '--show-error', '--max-time', '12',
                         '-w', '\n%{http_code}', *args, url], capture_output=True)
@@ -47,9 +66,9 @@ def curl(url, *args):
 
 
 class Session:
-    def __init__(self, name, public=False):
+    def __init__(self, name, public=False, local_origin=False):
         self.directory = OUT / name
-        self.directory.mkdir(parents=True)
+        self.directory.mkdir(mode=0o700, parents=True)
         self.log = (self.directory / 'app.log').open('w')
         self.canary = socket.socket()
         self.canary.bind(('127.0.0.1', 0))
@@ -60,9 +79,13 @@ class Session:
         if ip:
             targets.append(f'{ip}:{self.canary_port}')
         env = dict(os.environ, HONEYOBS_PROBE_TARGETS=','.join(targets))
-        command = [str(APP), '--headless', '--run-directory', str(self.directory)]
+        command = [str(APP), '--test-mode', '--headless', '--run-directory', str(self.directory)]
         if public:
             command.append('--public')
+        if local_origin:
+            command.append("--local-origin")
+        self.vz_helpers = []
+        register_app(APP.parents[2])
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT, env=env)
 
     def state(self):
@@ -74,7 +97,10 @@ class Session:
         return value
 
     def ready(self, public=False):
-        return wait(lambda: (s if (s := self.state()).get('phase') == ('公開中' if public else 'ローカル準備完了') else None), 240 if public else 40)
+        accepted = ['公開中', '公開URL取得済み'] if public else ['ローカル準備完了']
+        state = wait(lambda: s if (s := self.state()).get('phase') in accepted else None, 240 if public else 40)
+        self.vz_helpers = xpc_helpers(state['pid'])
+        return state
 
     def command(self, name):
         (self.directory / 'command').write_text(name)
@@ -83,19 +109,11 @@ class Session:
         if self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=7)
+                self.process.wait(timeout=12)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-        time.sleep(.5)
-        guard = read(self.directory / 'watchdog.json')
-        for key in ['watchdogPID', 'tunnelPID']:
-            pid = guard.get(key)
-            if alive(pid):
-                os.kill(pid, signal.SIGTERM)
-                time.sleep(.5)
-                if alive(pid):
-                    os.kill(pid, signal.SIGKILL)
+                bootout_owned(self.directory)
+                self.process.kill(); self.process.wait()
+        bootout_owned(self.directory)
         self.canary.close()
         self.log.close()
 
@@ -117,8 +135,8 @@ def isolation(session):
 
 
 def stopped(session, state, crash=False):
-    guard = read(session.directory / 'watchdog.json')
-    wait(lambda: not alive(guard.get('watchdogPID')) and not alive(guard.get('tunnelPID')), 9)
+    assert session.vz_helpers, '停止前の実VM所有証拠がありません'
+    wait(lambda: all(not alive(pid) for pid in session.vz_helpers), 9)
     try:
         sock = socket.create_connection(('127.0.0.1', state['originPort']), timeout=1)
     except OSError:
@@ -128,7 +146,7 @@ def stopped(session, state, crash=False):
         raise AssertionError('停止後もローカル入口が開いています')
     status, body, _ = curl(state['url'] + '/honeyobs-test-after-stop')
     assert body != b'Not found\n' and body != b'Authentication failed\n', (status, body[:100])
-    return {'originClosed': True, 'watchdogExited': True, 'tunnelExited': True,
+    return {'originClosed': True, 'ownedVZHelpersExited': True,
             'publicDecoyUnavailable': True, 'publicStatusAfterStop': status, 'crash': crash}
 
 
@@ -187,8 +205,11 @@ def lifecycle_test(name, crash):
     try:
         state = session.ready(public=True)
         if crash:
-            session.process.kill()
-            session.process.wait(timeout=5)
+            target = state['pid']
+            commandline = subprocess.check_output(['ps', '-p', str(target), '-o', 'command='], text=True).strip()
+            assert commandline.startswith(str(APP)) and '--session-client' in commandline, commandline
+            os.kill(target, signal.SIGKILL)
+            session.process.wait(timeout=8)
         else:
             session.command('simulate-sleep')
             wait(lambda: session.state().get('shutdownComplete') is True)
