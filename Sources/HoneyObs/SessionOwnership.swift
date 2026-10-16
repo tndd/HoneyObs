@@ -268,7 +268,20 @@ enum SessionOwnership {
         let temporary = URL(fileURLWithPath: arguments[5]), token = arguments[6], launcherBirth = arguments[8]
         let original = Array(arguments.dropFirst(9)), record = registry(original, directory: directory).appendingPathComponent("active-session.json")
         var client: pid_t?, clientBirth: String?, reason = "startup-failure", status: Int32 = 1, cleanExit = false, attemptedClientBootstrap = false
+        // UIの.session.lockがOSに解放された後も、最後の結果保存までretentionから保護する。
+        var recoveryLock: Int32 = -1
+        defer { if recoveryLock >= 0 { close(recoveryLock) } }
         do {
+            recoveryLock = open(directory.appendingPathComponent(".recovery.lock").path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+            var info = stat()
+            guard recoveryLock >= 0, fstat(recoveryLock, &info) == 0, info.st_uid == getuid(),
+                  info.st_mode & S_IFMT == S_IFREG, info.st_mode & 0o077 == 0 else { throw POSIXError(.EACCES) }
+            // pruneが直前にこの保存先を調べていた場合だけ短く待つ。無期限のflock待ちはしない。
+            let lockDeadline = safetyTime() + 2
+            while flock(recoveryLock, LOCK_EX | LOCK_NB) != 0 {
+                guard (errno == EWOULDBLOCK || errno == EINTR), safetyTime() < lockDeadline else { throw POSIXError(.EBUSY) }
+                usleep(20_000)
+            }
             let files = FileManager.default
             try files.createDirectory(at: record.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let lockFD = open(record.deletingLastPathComponent().appendingPathComponent("ownership.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
