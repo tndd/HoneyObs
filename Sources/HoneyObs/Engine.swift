@@ -20,6 +20,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var listener: NWListener?
     private var sessions: [UUID: Relay] = [:]
     private var pending: [UUID: NWConnection] = [:]
+    private var cancellingClients: [ObjectIdentifier:NWConnection] = [:]
     #if EGRESS_TESTING
     var egressTestHandler: ((UInt32, VZVirtioSocketConnection, @escaping () -> Void) -> Void)?
     private var egressFixture: EgressTestingFixture?
@@ -82,7 +83,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private(set) var sessionID = UUID().uuidString
     var shutdownComplete: Bool {
         !active && !stopping && !stopFailed && machine == nil &&
-        egress == nil && console == nil && guestReads.isEmpty && finalDrain == nil && listener == nil && sessions.isEmpty && pending.isEmpty
+        egress == nil && console == nil && guestReads.isEmpty && finalDrain == nil && listener == nil && sessions.isEmpty && pending.isEmpty && cancellingClients.isEmpty
     }
     var canStart: Bool { shutdownComplete }
     var isActive: Bool { active }
@@ -107,6 +108,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.stop(reason: "スリープ通知")
         }
+        try archiveSession?.setClosed(true)
+        update()
     }
 
     @discardableResult func save(_ object: Any, name: String) -> Bool {
@@ -142,6 +145,18 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             guard let self, self.console === console else { return }
             self.console = nil; self.consoleClosing = false; self.advanceStop()
         }
+    }
+    // Relayへ渡さなかった接続も、Network.frameworkの取消完了まで所有する。
+    private func cancelClient(_ client:NWConnection) {
+        if case .cancelled = client.state { return }
+        let id = ObjectIdentifier(client)
+        guard cancellingClients[id] == nil else { return }
+        cancellingClients[id] = client
+        client.stateUpdateHandler = { [weak self] state in
+            guard case .cancelled = state, let self else { return }
+            self.cancellingClients.removeValue(forKey:id); self.advanceStop()
+        }
+        client.start(queue:.main); client.cancel()
     }
 
     private func update() {
@@ -296,21 +311,22 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 }
             }
             server.newConnectionHandler = { [weak self] client in
-                guard let self, self.active, self.generation == current, permission.valid,
-                      let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { client.cancel(); return }
+                guard let self else { client.cancel(); return }
+                guard self.active, self.generation == current, permission.valid,
+                      let device = self.machine?.socketDevices.first as? VZVirtioSocketDevice else { self.cancelClient(client); return }
                 guard self.pending.count + self.sessions.count < 8 else {
-                    self.recordHostRejection("connection_limit"); client.cancel(); return
+                    self.recordHostRejection("connection_limit"); self.cancelClient(client); return
                 }
                 let pendingID = UUID(); self.pending[pendingID] = client
                 device.connect(toPort: 7000) { result in
                     self.pending.removeValue(forKey: pendingID)
                     guard self.active, self.generation == current, permission.valid else {
-                        client.cancel()
+                        self.cancelClient(client)
                         if case .success(let guest) = result { guest.close() }
                         self.advanceStop(); return
                     }
                     switch result {
-                    case .failure: self.recordHostRejection("guest_connect"); client.cancel()
+                    case .failure: self.recordHostRejection("guest_connect"); self.cancelClient(client)
                     case .success(let guest):
                         let id = UUID()
                         let relay = Relay(client: client, guest: guest, permit: permission, rejected: { [weak self] reason in
@@ -378,7 +394,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         stopAttempt = UUID(); stopStarted = ProcessInfo.processInfo.systemUptime
         timer?.invalidate(); timer = nil
         listener?.cancel()
-        for client in pending.values { client.cancel() }
+        for client in pending.values { cancelClient(client) }
         for relay in sessions.values { relay.cancel() }
         for read in guestReads.values { read.cancel() }
         stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
@@ -388,7 +404,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func advanceStop() {
         guard stopping else { return }
         if !stopVMsStarted {
-            if listener == nil, sessions.isEmpty, pending.isEmpty, !finalDrainStarted {
+            if listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty, !finalDrainStarted {
                 finalDrainStarted = true; let attempt = stopAttempt
                 drainFinalObservations { [weak self] in
                     guard let self, self.stopping, self.stopAttempt == attempt else { return }
@@ -427,7 +443,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
         }
         if machine == nil { closeConsole() }
-        if stopVMsStarted, machine == nil, console == nil, guestReads.isEmpty, egress == nil, listener == nil, sessions.isEmpty, pending.isEmpty {
+        if stopVMsStarted, machine == nil, console == nil, guestReads.isEmpty, egress == nil, listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty {
             finishStop(error: nil)
         } else if ProcessInfo.processInfo.systemUptime - stopStarted >= stopLimit {
             finishStop(error: "停止期限を超えました。終了未確認のため再開できません")
