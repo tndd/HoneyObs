@@ -29,7 +29,7 @@ final class SessionArchive {
         let lock = Darwin.open(root.appendingPathComponent(".retention.lock").path,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0o600)
         guard lock >= 0 else { throw failure("保存先の排他を開始できません") }
         defer { Darwin.close(lock) }
-        guard flock(lock,LOCK_EX) == 0 else { throw failure("保存先を排他できません") }
+        guard flock(lock,LOCK_EX|LOCK_NB) == 0 else { throw failure("別の起動処理が保存先を利用中です") }
         var items: [(URL,Marker,Int64,Bool)] = []
         var probes: [Int32] = []
         defer { for probe in probes { Darwin.close(probe) } }

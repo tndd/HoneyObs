@@ -82,7 +82,7 @@ func listenVM(port uint32) (*vmListener, error) {
 		syscall.Close(fd)
 		return nil, e
 	}
-	return &vmListener{fd}, nil
+	return &vmListener{fd: fd}, nil
 }
 
 func isolation(targets []string) map[string]any {
