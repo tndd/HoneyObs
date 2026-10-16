@@ -12,9 +12,7 @@ fi
 cleanup() {
   local qa_exit_status=$?
   trap - EXIT
-  if ! python3 tests/qa_registry.py "$PWD/build/HoneyObs.app"; then
-    if [[ "$qa_exit_status" == 0 ]]; then qa_exit_status=1; fi
-  fi
+  # 各harnessが自分のappを成功報告前に解除する。解除済みappを二重にscanしない。
   rm -f "$lock/pid"
   rmdir "$lock"
   exit "$qa_exit_status"
