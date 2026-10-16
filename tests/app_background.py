@@ -123,9 +123,10 @@ def main():
                 background_start = time.monotonic()
                 end = time.monotonic() + 8
                 while time.monotonic() < end:
+                    before = read(run / 'state.json')
+                    native = read(run / 'background-state.json')
                     result = request(port, host)
                     current = read(run / 'state.json')
-                    native = read(run / 'background-state.json')
                     if native and (native['safetyNow'] >= native['permitDeadline'] or not native['permitValid']):
                         expired_at = expired_at or time.monotonic()
                     if expired_at is not None:
@@ -138,8 +139,10 @@ def main():
                         except ConnectionResetError:
                             held_closed_at = round(time.monotonic() - background_start, 3)
                     if result == 'accepted':
-                        assert current.get('active'), '停止要求後もHTTPを受理しました'
-                        snapshot = wait(lambda: fresh(run), 1.6)
+                        assert before.get('active'), '停止要求後もHTTPを受理しました'
+                        # 受信後に停止へ遷移した要求を、停止後の新規受理へ読み替えない。
+                        snapshot = wait(lambda: fresh(run), 1.6) if current.get('active') else native
+                        assert snapshot['permitValid'] and snapshot['permitDeadline'] > snapshot['safetyNow']
                         samples.append({'response': result, 'uiAge': round(snapshot['safetyNow'] - snapshot['uiConfirmedAt'], 3),
                                         'guestAge': round(snapshot['safetyNow'] - snapshot['guestConfirmedAt'], 3)})
                     elif not current.get('active', True):
@@ -160,6 +163,16 @@ def main():
                     cutoff = wait(lambda: s if (s := read(run / 'state.json')).get('shutdownComplete') else None)
                     assert not cutoff['vmPresent'] and request(port, host) == 'closed'
                     wait(lambda: helpers_gone(witness), 8)
+                if held_closed_at is None:
+                    def held_closed():
+                        if not select.select([held], [], [], 0)[0]:
+                            return False
+                        try:
+                            return held.recv(4096) == b''
+                        except ConnectionResetError:
+                            return True
+                    wait(held_closed, 2)
+                    held_closed_at = round(time.monotonic() - background_start, 3)
                 REPORT['cases'][action] = {'nativeState': read(run / 'background-state.json'), 'acceptedSamples': samples,
                                           'stoppedState': cutoff, 'xpcOwnershipWitness': witness, 'xpcGoneBeforeCleanup': True,
                                           'heldClosedWithin': held_closed_at,
