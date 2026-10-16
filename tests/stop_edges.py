@@ -5,7 +5,7 @@ import os
 import signal
 import subprocess
 from integration import APP, OUT, Session, read, wait, alive, bootout_owned
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 
 def main():
@@ -45,6 +45,7 @@ def main():
         report['observedBeforeCleanup'] = True
     finally:
         session.cleanup()
+    require_cleanup()
     (OUT / 'stop-edges-report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print('起動中の終了・OS監視故障からの実VM回収: PASS')
     print('検証記録:', OUT)

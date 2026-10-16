@@ -55,9 +55,17 @@ def unregister_app(app):
 def cleanup():
     success = True
     for app in sorted(_registered):
-        success = unregister_app(app) and success
-    _registered.clear()
+        if unregister_app(app):
+            _registered.remove(app)
+        else:
+            success = False
     return success
+
+
+def require_cleanup():
+    """成功記録の前に呼ぶ。失敗対象はatexitの再試行用に残す。"""
+    if not cleanup():
+        raise RuntimeError('QAアプリの登録解除を確認できません: ' + ', '.join(map(str, sorted(_registered))))
 
 
 atexit.register(cleanup)

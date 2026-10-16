@@ -14,7 +14,7 @@ import socket
 import subprocess
 import time
 import uuid
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
@@ -218,7 +218,6 @@ def main():
                 wrapper.wait(timeout=15)
                 assert wrapper.returncode == 0, wrapper.returncode
                 wait(lambda: all(not process(owner[key]) for key in ['ownerPID', 'clientPID']))
-                print(action + ': PASS', flush=True)
             except BaseException as error:
                 REPORT['cases'][action] = {'failed': repr(error), 'stateBeforeCleanup': read(run / 'state.json'),
                                           'nativeBeforeCleanup': read(run / 'background-state.json'), 'witness': witness}
@@ -233,7 +232,10 @@ def main():
                         wrapper.wait(timeout=15)
                     except subprocess.TimeoutExpired:
                         wrapper.kill(); wrapper.wait()
+    require_cleanup()
     (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
+    for action in REPORT['cases']:
+        print(action + ': PASS', flush=True)
     print('自アプリの背景化・freshness・停止後VZ回収: PASS', OUT)
 
 

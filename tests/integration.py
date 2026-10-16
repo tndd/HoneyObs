@@ -10,7 +10,7 @@ import socket
 import subprocess
 import time
 import uuid
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / 'build/HoneyObs.app/Contents/MacOS/HoneyObs'
@@ -225,21 +225,25 @@ def main():
     args = parser.parse_args()
     OUT.mkdir(parents=True)
     report = {'actualSleep': 'ユーザー指定により未実施。通知ハンドラの検証とは区別する。'}
+    passed = []
     try:
         report['local'] = local_test()
-        print('ローカルVMと隔離: PASS', flush=True)
+        passed.append('ローカルVMと隔離: PASS')
         if not args.local:
             report['public'] = public_test()
-            print('実公開・IP・通常停止: PASS', flush=True)
+            passed.append('実公開・IP・通常停止: PASS')
             report['forceQuit'] = lifecycle_test('force-quit', True)
-            print('強制終了とトンネル回収: PASS', flush=True)
+            passed.append('強制終了とトンネル回収: PASS')
             report['sleepNotificationOnly'] = lifecycle_test('sleep-notification', False)
-            print('スリープ通知ハンドラ: PASS（実スリープは未検証）', flush=True)
+            passed.append('スリープ通知ハンドラ: PASS（実スリープは未検証）')
+        require_cleanup()
     except Exception as exc:
         report['failure'] = str(exc)
         raise
     finally:
         (OUT / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    for message in passed:
+        print(message, flush=True)
         print('検証記録:', OUT, flush=True)
 
 

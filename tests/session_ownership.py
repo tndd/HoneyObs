@@ -12,7 +12,7 @@ import socket
 import subprocess
 import threading
 import time
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 options_parser = argparse.ArgumentParser()
 options_parser.add_argument('--egress-fixture', action='store_true', help='EGRESS_TESTING専用appの固定loopback fixtureで通信VMも検証する')
@@ -289,7 +289,6 @@ for fault in faults:
                                   'cooperativeHelperStop': cooperative_helper_stop, 'timeline': timeline,
                                   'directVZOwnerGone': True, 'monitorGone': True, 'xpcHelpersGone': True,
                                   'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True}
-        print(fault + ': PASS', flush=True)
     except BaseException as error:
         REPORT['cases'][fault] = {'failed': repr(error), 'owner': owner, 'state': read(run / 'state.json'),
                                   'membersBeforeCleanup': members(owner.get('clientPGID', -1)),
@@ -319,5 +318,8 @@ for fault in faults:
             except subprocess.TimeoutExpired:
                 wrapper.kill(); wrapper.wait()
 
+require_cleanup()
 (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
+for fault in REPORT['cases']:
+    print(fault + ': PASS', flush=True)
 print('実VMのOS所有・既存接続遮断・job/XPC/IPC回収: PASS', OUT)
