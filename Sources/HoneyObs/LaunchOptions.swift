@@ -16,7 +16,7 @@ struct LaunchOptions {
     init(arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment,
          defaultDirectory: URL? = nil) throws {
         testing = arguments.contains("--test-mode")
-        let restricted = ["--headless", "--public", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke"]
+        let restricted = ["--headless", "--public", "--local-origin", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke"]
         guard testing || !restricted.contains(where: arguments.contains) else {
             throw Self.invalid("検証用フラグには --test-mode と私有の --run-directory が必要です")
         }

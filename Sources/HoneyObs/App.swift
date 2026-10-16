@@ -31,7 +31,7 @@ func watchdog(_ args: [String]) {
         guard receivePermit() else { exit(2) }; usleep(20_000)
     }
     guard expires>safetyTime(), watchdogStop==0, getppid()==parent else { exit(2) }
-    let process = Process(); process.executableURL = URL(fileURLWithPath:args[4])
+    let process = SessionProcess(); process.executableURL = URL(fileURLWithPath:args[4])
     process.arguments = Array(args.dropFirst(5)); process.standardInput = FileHandle.nullDevice
     let output = Pipe(); process.standardOutput = output; process.standardError = output
     let fd = output.fileHandleForReading.fileDescriptor
@@ -55,7 +55,7 @@ func watchdog(_ args: [String]) {
     }
     if process.isRunning { process.terminate() }
     for _ in 0..<20 { drain(); if !process.isRunning { break }; usleep(100_000) }
-    if process.isRunning { kill(process.processIdentifier,SIGKILL) }
+    if process.isRunning { process.send(SIGKILL) }
     process.waitUntilExit(); drain()
 }
 
@@ -69,13 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusTimer: Timer?
     private let uiSmoke: Bool
     private let uiPublicSmoke: Bool
-    private let dashboardSmoke = CommandLine.arguments.contains("--ui-dashboard-smoke") || CommandLine.arguments.contains("--ui-exercise-smoke")
+    private let options: LaunchOptions
+    private var dashboardSmoke: Bool { options.dashboardSmoke }
     private var smokeStage = 0
     private var terminationPending = false
 
-    init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) {
-        self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke
-        engine.requiresUIHeartbeat = !headless
+    init(engine: Engine, options: LaunchOptions) {
+        self.options = options
+        self.engine = engine; self.headless = options.headless; self.uiSmoke = options.uiSmoke; self.uiPublicSmoke = options.uiPublicSmoke
+        engine.requiresUIHeartbeat = !options.headless
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -86,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { NSApp.terminate(nil) }
             source.resume(); sources.append(source)
         }
-        if headless { engine.start(publish: CommandLine.arguments.contains("--public")) }
+        if headless { engine.start(publish: CommandLine.arguments.contains("--public"), localExercise: options.testing && CommandLine.arguments.contains("--local-origin")) }
         else { createWindow() }
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
@@ -115,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if self.uiSmoke { self.dashboard?.testAction("local") }
             if self.uiPublicSmoke { self.dashboard?.testAction("public") }
-            if CommandLine.arguments.contains("--ui-exercise-smoke") { self.dashboard?.testAction("exercise") }
+            if options.exerciseSmoke { self.dashboard?.testAction("exercise") }
         }
         window.contentView = dashboard.webView
         self.dashboard = dashboard; self.window = window
@@ -127,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard?.refresh()
         if dashboardSmoke {
             dashboard?.testState()
-            if CommandLine.arguments.contains("--ui-exercise-smoke"), let endpoint = engine.exerciseEndpoint {
+            if options.exerciseSmoke, let endpoint = engine.exerciseEndpoint {
                 engine.save(["host":endpoint.host],name:"test-origin.json")
             }
             let command = engine.directory.appendingPathComponent("ui-command")
@@ -189,20 +191,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGPIPE, SIG_IGN)
         let args = CommandLine.arguments
         if args.contains("--watchdog") { watchdog(args); return }
-        let headless = args.contains("--headless")
-        let directory: URL
-        if let i = args.firstIndex(of: "--run-directory"), i+1 < args.count { directory = URL(fileURLWithPath: args[i+1]) }
-        else {
-            directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("HoneyObs/検証/" + UUID().uuidString)
-        }
         do {
-            let engine = try Engine(directory: directory, resources: Bundle.main.resourceURL!)
-            let delegate = AppDelegate(engine: engine, headless: headless, uiSmoke: args.contains("--ui-smoke"), uiPublicSmoke: args.contains("--ui-public-smoke"))
+            let options = try LaunchOptions(arguments: args)
+            if !args.contains("--session-client") {
+                exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args))
+            }
+            let ownership = try SessionClient(arguments: args, directory: options.directory)
+            let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets)
+            ownership.requiresRecovery = { engine.requiresSessionRecovery }
+            let delegate = AppDelegate(engine: engine, options: options)
             let application = NSApplication.shared
-            application.setActivationPolicy(headless ? .prohibited : .regular)
+            application.setActivationPolicy(options.headless ? .prohibited : .regular)
             application.delegate = delegate
-            withExtendedLifetime(delegate) { application.run() }
+            withExtendedLifetime((delegate, ownership)) { application.run() }
         } catch { fputs("起動失敗: \(error)\n",stderr); exit(1) }
     }
 }

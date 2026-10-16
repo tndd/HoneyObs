@@ -15,7 +15,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private var listener: NWListener?
     private var sessions: [UUID: Relay] = [:]
     private var pending: [UUID: NWConnection] = [:]
-    private var supervisor: Process?
+    private var supervisor: SessionProcess?
     private var permit: ForwardingPermit?
     private var permitTimer: Timer?
     private var leaseWriter: FileHandle?
@@ -60,6 +60,9 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private let healthLimit: TimeInterval
     private let stopMachine: (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void
     private let readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)?
+    private let testing: Bool
+    private let probeTargets: String
+    var requiresSessionRecovery: Bool { stopFailed || supervisorUnconfirmed }
     private var observations = ObservationStore()
     private var lastArchive = Data()
     private var hostRejections: [String: ObservationStore.Rejection] = [:]
@@ -73,10 +76,10 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     var isActive: Bool { active }
     var isLocalExercise: Bool { localExercise }
 
-    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5,
+    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "",
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
          readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil) throws {
-        self.directory = directory; self.resources = resources
+        self.directory = directory; self.resources = resources; self.testing = testing; self.probeTargets = probeTargets
         self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
         self.readGuest = readGuest
         super.init()
@@ -154,7 +157,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func tick() {
         guard active, let machine else { return }
         let command = directory.appendingPathComponent("command")
-        if let value = try? String(contentsOf: command, encoding: .utf8) {
+        if testing, let value = try? String(contentsOf: command, encoding: .utf8) {
             try? FileManager.default.removeItem(at: command)
             if value.trimmingCharacters(in: .whitespacesAndNewlines) == "simulate-sleep" {
                 NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil); return
@@ -201,7 +204,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
             if !self.diagnosticsStarted {
                 self.diagnosticsStarted = true
-                let extra = ProcessInfo.processInfo.environment["HONEYOBS_PROBE_TARGETS"] ?? ""
+                let extra = testing ? probeTargets : ""
                 let suffix = extra.split(separator: ",").map { "target=" + $0 }.joined(separator: "&")
                 guestRequest(machine, path: "/isolation?" + suffix) { result in
                     guard self.active, self.generation == current else { return }
@@ -231,7 +234,11 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 guard self.active, self.generation == current else { return }
                 switch state {
                 case .ready:
-                    if let port = server?.port { self.localPort = port.rawValue; self.originReady() }
+                    if let port = server?.port {
+                        self.localPort = port.rawValue
+                        if self.testing { self.save(["host": self.originHost], name: "test-origin.json") }
+                        self.originReady()
+                    }
                 case .failed(let error): self.fail(error.localizedDescription)
                 default: break
                 }
@@ -280,24 +287,31 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         guard let writer = leaseWriter, let reader = leaseReader else { return }
         var buffer = [UInt8](repeating: 0, count: 512)
         let count = Darwin.read(reader.fileDescriptor, &buffer, buffer.count)
-        if count == 0 { fail("監視役との確認通信が切断されました"); return }
+        if count == 0 { guardianFailure("監視役との確認通信が切断されました"); return }
+        if count < 0, errno != EAGAIN, errno != EINTR { guardianFailure("監視役との確認通信が失敗しました"); return }
         if count > 0 { ackBytes.append(contentsOf: buffer.prefix(count)) }
         while ackBytes.count >= 16 {
             let frame = Data(ackBytes.prefix(16)); ackBytes.removeFirst(16)
             let sequence = frame.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
             let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
-            guard sequence > ackSequence, sequence <= leaseSequence else { fail("監視役の確認番号が不正です"); return }
+            guard sequence > ackSequence, sequence <= leaseSequence else { guardianFailure("監視役の確認番号が不正です"); return }
             ackSequence = sequence; guardianDeadline = Double(expiry) / 1_000_000_000
         }
         if safetyTime() - guardianStarted > 1, guardianDeadline <= safetyTime() {
-            fail("監視役の応答期限を超えたため転送を停止します"); return
+            guardianFailure("監視役の応答期限を超えたため転送を停止します"); return
         }
         leaseSequence += 1
         var sequence = leaseSequence, expiry = UInt64(permit.deadline * 1_000_000_000)
         var frame = withUnsafeBytes(of: &sequence) { Data($0) }
         frame.append(withUnsafeBytes(of: &expiry) { Data($0) })
         let written = frame.withUnsafeBytes { Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) }
-        if written != frame.count { fail("監視役への転送許可を送れません") }
+        if written != frame.count { guardianFailure("監視役への転送許可を送れません") }
+    }
+
+    private func guardianFailure(_ message: String) {
+        // A stopped/killed guardian cannot attest to child cleanup. The session
+        // client revokes the OS owner as well instead of waiting for its return.
+        supervisorUnconfirmed = true; fail(message)
     }
 
     private func startTunnel() {
@@ -307,7 +321,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         let config = directory.appendingPathComponent("tunnel.yml")
         // 利用者の既存cloudflared設定を読み込まない。
         try? Data("{}\n".utf8).write(to: config)
-        let process = Process(); process.executableURL = Bundle.main.executableURL
+        let process = SessionProcess(); process.executableURL = Bundle.main.executableURL
         process.environment = ["PATH": "/usr/bin:/bin"]
         process.arguments = ["--watchdog", String(getpid()), directory.path, resources.appendingPathComponent("cloudflared").path,
                              "tunnel", "--config", config.path, "--no-autoupdate", "--url", "http://127.0.0.1:\(localPort)",
