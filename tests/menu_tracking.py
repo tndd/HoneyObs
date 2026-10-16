@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--expect-menu-failure', action='store_true', help='修正前の再現証拠だけを採取する')
@@ -43,7 +43,7 @@ def wait(predicate, seconds=10):
         time.sleep(.04)
     raise AssertionError('メニュー検査の待機期限を超えました')
 
-report = {'actualNSMenu': True, 'actualVM': False, 'baselineExpectedFailure': options.expect_menu_failure, 'cases': {}}
+report = {'actualNSMenu': True, 'actualVM': False, 'baselineExpectedFailure': options.expect_menu_failure, 'success': False, 'cases': {}}
 for case in ['menu', 'main-freeze']:
     run = OUT / case; run.mkdir(mode=0o700); owner = {}
     with (run / 'launcher.log').open('w') as log:
@@ -70,7 +70,6 @@ for case in ['menu', 'main-freeze']:
             assert not Path(owner['socketDirectory']).exists()
             report['cases'][case] = {'exit': wrapper.returncode, 'trackingModes': modes, 'allGoneBeforeCleanup': True,
                                      'sessionResult': read(run / 'session-result.json')}
-            print(case + ': PASS', flush=True)
         except BaseException as error:
             report['cases'][case] = {'failed': repr(error), 'owner': owner, 'trackingModes': read(run / 'tracking-modes.json')}
             raise
@@ -79,4 +78,13 @@ for case in ['menu', 'main-freeze']:
             for key in ['clientService', 'ownerService']:
                 if key in owner: command('/bin/launchctl', 'bootout', owner[key])
             if wrapper.poll() is None: wrapper.terminate(); wrapper.wait(timeout=10)
+try:
+    require_cleanup()
+except BaseException as error:
+    report['registryCleanupError'] = str(error)
+    (OUT / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    raise
+report['success'] = True
+(OUT / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+for case in report['cases']: print(case + ': PASS', flush=True)
 print('実メニュー追跡とmain停止の区別: PASS', OUT)
