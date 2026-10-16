@@ -24,7 +24,7 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 
 `python3 tests/egress_privileges.py` は同じ製品Goソースを専用Linux test binaryにし、NIC・共有・ディスクなしの私有VMで実行します。権限縮小とseccomp設定を意図的に別OS threadへ置き、UID65533・能力なし・NNP1・Seccomp2・IPv6 socket拒否を、既存thread・新thread・exec後に照合します。通信VM launcherのビルドは `CGO_ENABLED=0` が必須です。NNPの全thread同期がcgoの外部threadを検査できないためで、ビルドスクリプトで固定しています。同期不能やseccomp TSYNCの失敗threadIDは起動失敗として扱います。
 
-`tests/installed_app.py` と `tests/permit_faults.py` は導入済みアプリを対象にする別検証です。専用ゲートに自動混入させません。
+`tests/installed_app.py` は導入済みアプリを対象にする別検証です。専用ゲートに自動混入させません。`tests/permit_faults.py` は現行buildの署名済み私有コピーとlocalhostを用い、mainの5秒停止・JS無限ループ、期限後HTTP拒否、VM回収と非復活を確認し、専用ゲートにも含めます。
 
 実アプリを起動するPython検査は `tests/qa_registry.py` にそのアプリだけを記録し、全caseの稼働・回収判定が終わったPython終了時に `lsregister -u` でQA登録を解除します。専用ゲートのEXITでも自分のbuildバンドルだけを解除します。この作業treeのbuild/test-results内のHoneyObs以外、導入済みアプリ、別worktree、symlinkは受け付けず、登録一覧の探索や一括解除はしません。検査中のプロセスやVMをこの処理で終了させることもありません。
 

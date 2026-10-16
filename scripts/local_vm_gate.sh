@@ -35,3 +35,4 @@ python3 tests/final_observation.py
 bash scripts/ownership_gate.sh
 python3 tests/self_pentest.py --close-after
 python3 tests/app_background.py
+python3 tests/permit_faults.py
