@@ -89,16 +89,25 @@ exec /bin/mv "$@"
         subprocess.run(['codesign', '--force', '--sign', '-', str(path)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def install(self, *, rollback=False, fail='', succeeds=True):
+    def install(self, *, rollback=False, fail='', succeeds=True, shell='bash'):
         environment = dict(os.environ, PATH=str(self.commands) + os.pathsep + os.environ['PATH'],
                            FIXTURE_FAIL=fail, FIXTURE_MARK=str(self.root / 'failed-once'))
-        arguments = ['bash', str(self.root / 'scripts/install.sh')]
+        arguments = [shell, str(self.root / 'scripts/install.sh')]
         if rollback:
             arguments.append('--rollback')
         result = subprocess.run(arguments + [str(self.destination)], env=environment,
                                 text=True, errors='replace', capture_output=True, timeout=15)
         self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+        if succeeds:
+            self.assertNotIn('unbound variable', result.stderr)
         return result
+
+    def test_system_bash_update_reports_backup_without_expansion_error(self):
+        self.make_app(self.target, 'old')
+        result = self.install(shell='/bin/bash')
+        self.assertIn(str(self.backup) + '（', result.stdout)
+        self.assertEqual(self.version(self.target), 'new')
+        self.assertEqual(self.version(self.backup), 'old')
 
     def version(self, app):
         return (app / 'Contents/Resources/version').read_text()

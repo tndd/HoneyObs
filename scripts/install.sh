@@ -78,4 +78,4 @@ if [[ -n "$old_app" ]]; then
 fi
 committed=1
 echo "インストール完了: $target_app"
-if [[ -e "$backup_app" ]]; then echo "直前の版: $backup_app（復元: bash scripts/install.sh --rollback \"$install_root\"）"; fi
+if [[ -e "$backup_app" ]]; then echo "直前の版: ${backup_app}（復元: bash scripts/install.sh --rollback \"$install_root\"）"; fi
