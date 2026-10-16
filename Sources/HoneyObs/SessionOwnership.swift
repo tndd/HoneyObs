@@ -258,7 +258,12 @@ enum SessionOwnership {
                         try save(receipt, directory.appendingPathComponent("ui-ready.json")); continue
                     }
                     let now = safetyTime(), expires = Double(expiry) / 1_000_000_000
-                    guard next > sequence, expires > now, expires <= now + 3.01 else { invalid = true; break }
+                    guard next > sequence, expires > now, expires <= now + 3.01 else {
+                        if original.contains("--test-mode") {
+                            try? save(["next":next,"previous":sequence,"expires":expires,"safetyNow":now,"uiReady":uiReady], directory.appendingPathComponent("invalid-lease.json"))
+                        }
+                        invalid = true; break
+                    }
                     sequence = next; deadline = expires
                     if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { invalid = true; break }
                 }
@@ -288,7 +293,7 @@ final class SessionClient {
     private let temporary: URL, record: URL, directory: URL
     private var timer: Timer?, sequence: UInt64 = 0, acknowledged: UInt64 = 0
     private var issued: [UInt64: UInt64] = [:], pending = Data(), deadline = safetyTime() + 3
-    private var revoked = false, ready = false
+    private var revoked = false, ready = false, finished = false
     init(arguments: [String], directory: URL) throws {
         guard let index = arguments.firstIndex(of: "--session-client"), index + 6 < arguments.count,
               getppid() == 1, getpgrp() == getpid(), let launcher = pid_t(arguments[index + 5]) else { throw POSIXError(.EPERM) }
@@ -318,7 +323,7 @@ final class SessionClient {
         if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { revoke() }
     }
     func finish() {
-        guard ready, !revoked else { return }
+        guard ready, !revoked, !finished else { return }; finished = true
         timer?.invalidate(); timer = nil
         var control: UInt64 = 0, cleanExit: UInt64 = 1
         var frame = withUnsafeBytes(of: &control) { Data($0) }; frame.append(withUnsafeBytes(of: &cleanExit) { Data($0) })

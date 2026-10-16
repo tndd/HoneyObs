@@ -3,6 +3,7 @@ import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var onReady: (() -> Void)?
+    var onWillTerminate: (() -> Void)?
     let engine: Engine
     let headless: Bool
     private var window: NSWindow?
@@ -147,6 +148,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateCancel
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) {
+        if engine.shutdownComplete { onWillTerminate?() }
+    }
 }
 
 @main struct HoneyObs {
@@ -174,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ownership.onRevoke = { engine.stop(reason: "OS監視の確認期限切れ") }
             let delegate = AppDelegate(engine: engine, options: options)
             delegate.onReady = { [weak ownership] in ownership?.markUIReady() }
+            delegate.onWillTerminate = { [weak ownership] in ownership?.finish() }
             let application = NSApplication.shared
             application.setActivationPolicy(options.headless ? .prohibited : .regular)
             application.delegate = delegate
