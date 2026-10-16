@@ -20,6 +20,7 @@ bash tests/lifecycle.sh
 python3 tests/egress_privileges.py
 bash tests/egress.sh --vm
 bash tests/egress_engine.sh
+bash tests/relay_closure.sh "$PWD/build/HoneyObs.app/Contents/Resources"
 python3 tests/final_observation.py
 bash scripts/ownership_gate.sh
 python3 tests/self_pentest.py --close-after
