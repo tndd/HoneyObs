@@ -57,8 +57,13 @@ enum SessionOwnership {
         guard pipe(&descriptors) == 0 else { return (-1, "制御CLIのpipeを作成できません") }
         let reader = descriptors[0], writer = descriptors[1]
         defer { close(reader) }
-        for fd in descriptors { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
-        _ = fcntl(reader, F_SETFL, fcntl(reader, F_GETFL) | O_NONBLOCK)
+        guard descriptors.allSatisfy({ fcntl($0, F_SETFD, FD_CLOEXEC) == 0 }) else {
+            close(writer); return (-1, "制御CLIのFD継承制限に失敗")
+        }
+        let flags = fcntl(reader, F_GETFL)
+        guard flags >= 0, fcntl(reader, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            close(writer); return (-1, "制御CLIを非同期読取りへ設定できません")
+        }
         var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
         guard posix_spawn_file_actions_init(&actions) == 0 else { close(writer); return (-1, "制御CLIのFD設定に失敗") }
         defer { posix_spawn_file_actions_destroy(&actions) }
