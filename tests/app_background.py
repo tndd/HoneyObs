@@ -113,7 +113,7 @@ def restored(value, baseline, action):
     if value.get('windowMiniaturized') is not False or value.get('windowNumber') != baseline.get('windowNumber'):
         return False
     before, after = baseline.get('windowServerBounds', {}), value.get('windowServerBounds', {})
-    return all(before.get(key, 0) > 0 and after.get(key, 0) >= before[key] * .85 for key in ['Width', 'Height'])
+    return all(before.get(key, 0) > 0 and before[key] * .85 <= after.get(key, 0) <= before[key] * 1.15 for key in ['Width', 'Height'])
 
 
 def main():
@@ -140,7 +140,10 @@ def main():
                 state = wait(lambda: s if (s := read(run / 'state.json')).get('originPort') else None, 45)
                 port, host = state['originPort'], wait(lambda: read(run / 'test-origin.json').get('host'))
                 wait(lambda: fresh(run))
-                baseline = read(run / 'background-state.json')
+                command(run, 'show')
+                baseline = wait(lambda: value if ((value := read(run / 'background-state.json')).get('windowServerBounds', {}).get('Width', 0) >= 700
+                                                  and value.get('windowServerBounds', {}).get('Height', 0) >= 500
+                                                  and value.get('appHidden') is False) else None)
                 assert baseline.get('windowServerBounds', {}).get('Width', 0) > 0, 'OSのwindow boundsがありません'
                 assert not state['url'] and not (run / 'tunnel.log').exists()
                 witness = helpers(pid)
