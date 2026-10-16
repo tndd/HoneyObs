@@ -1,5 +1,5 @@
 #!/bin/bash
-# VM・同梱カーネル・ネットワーク・インストール済みアプリを使わない検証。
+# VM・同梱カーネル・外部ネットワーク・インストール済みアプリを使わない検証。通信競合はlocalhostで確認する。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p test-results/unit-bin
