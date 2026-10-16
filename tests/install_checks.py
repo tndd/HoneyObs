@@ -79,6 +79,11 @@ exec /bin/mv "$@"
         resources = path / 'Contents/Resources'
         resources.mkdir()
         shutil.copy2(self.binary, path / 'Contents/MacOS/HoneyObs')
+        helper = path / 'Contents/Helpers/HoneyObsSession'
+        helper.parent.mkdir()
+        shutil.copy2(self.binary, helper)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(helper)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (resources / 'AppIcon.icns').write_bytes(b'fixture-icon')
         (resources / 'version').write_text(version)
         (path / 'Contents/Info.plist').write_bytes(plistlib.dumps({
@@ -169,6 +174,28 @@ exec /bin/mv "$@"
         process = subprocess.Popen([str(self.backup / 'Contents/MacOS/HoneyObs')])
         try:
             self.install(succeeds=False)
+            self.assertEqual(self.version(self.backup), 'old')
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_running_monitor_without_ui_is_not_replaced(self):
+        self.make_app(self.target, 'old')
+        process = subprocess.Popen([str(self.target / 'Contents/Helpers/HoneyObsSession')])
+        try:
+            result = self.install(succeeds=False)
+            self.assertIn('終了してから', result.stderr)
+            self.assertEqual(self.version(self.target), 'old')
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_running_backup_monitor_without_ui_is_not_removed(self):
+        self.make_app(self.backup, 'old')
+        process = subprocess.Popen([str(self.backup / 'Contents/Helpers/HoneyObsSession')])
+        try:
+            result = self.install(succeeds=False)
+            self.assertIn('終了してから', result.stderr)
             self.assertEqual(self.version(self.backup), 'old')
         finally:
             process.terminate()

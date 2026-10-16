@@ -23,9 +23,11 @@ test -f "$source_app/Contents/Resources/AppIcon.icns"
 codesign --verify --deep --strict "$source_app"
 # 実行ファイルを開いているプロセスを確認する。パスを正規表現へ展開しない。
 for protected_app in "$target_app" "$backup_app"; do
-  if [[ -e "$protected_app/Contents/MacOS/HoneyObs" ]] && /usr/sbin/lsof -t "$protected_app/Contents/MacOS/HoneyObs" >/dev/null 2>&1; then
-    echo 'HoneyObsを終了してからインストールしてください。' >&2; exit 1
-  fi
+  for protected_executable in "$protected_app/Contents/MacOS/HoneyObs" "$protected_app/Contents/Helpers/HoneyObsSession"; do
+    if [[ -e "$protected_executable" ]] && /usr/sbin/lsof -t "$protected_executable" >/dev/null 2>&1; then
+      echo 'HoneyObsを終了してからインストールしてください。' >&2; exit 1
+    fi
+  done
 done
 stage="$(mktemp -d "$install_root/.HoneyObs-install.XXXXXX")"
 old_app=""; prior_backup=""; candidate_installed=0; promoting_backup=0; committed=0
