@@ -1,10 +1,28 @@
 # 検証記録
 
-## 現行の2VM・OS所有構成（2026-10-17）
+## 追加レビュー5件の修正（2026-10-17、0.3.1 build 5）
 
-この節が現行構成の記録である。後続の2026-10-15〜17の節は各時点の構成の履歴であり、旧host cloudflaredの公開成功を新しい通信VMの外部経路成功へ読み替えない。
+[PR #25の追加レビュー](https://github.com/tndd/HoneyObs/pull/25#issuecomment-6222966553)を対象に、修正前の再現と修正後の回帰を追加した。環境はApple Silicon・macOS 15.8.1・Swift 6.2.4、製品コードの統合点は `fa19e39`。後続のQA・文書変更は別途記録する。
 
-対象はApple Silicon・macOS 15.8.1・Swift 6.2.4、製品ソース `14a90d5`、0.3.0 build 4のローカル署名版。後続の変更は試験ハーネス・導入スクリプト・CI・文書である。
+| 指摘 | 修正と検証 |
+| --- | --- |
+| 失効後の新規送信 | NW send/startの発行を取消・許可検査と直列化し、blocking read後も再検査。実socketpair＋localhost NWで期限後送信・最終read・cancel/revoke競合の4群が合格。旧実装では期限後のpayload送信と期限跨ぎreadの受理を再現。`tests/egress_revocation.sh` を単体CIへ接続 |
+| メニュー操作による誤失効 | 所有/UI/VM/停止のTimerをcommon modesへ登録。旧SessionClientは実NSMenu追跡中にjob消滅、新版は追跡4.2秒を維持し、main停止は引き続き失効。製品WKWebViewと実VMでもtracking中/後のHTTP、UI/guest時刻、許可、同じPID/生成時刻と両jobの維持、終了後の回収を確認 |
+| 保存の期限超過を確定 | 20ms予算/40ms保存の旧実装は実測52ms主キューを塞いでconfirmed。修正後はstart復帰3ms、23msでpartial、sealed=false。保存中も期限通知が進み、遅着で確定へ戻らない。実VMではwriterを止めたまま約0.669秒でVZ helper消滅を独立観測し、I/O回収前の停止完了/再開/停止再試行を拒否 |
+| 異常終了記録の早期削除 | 監視役のrecovery lockと、初回中断観測から600秒の猶予を追加。旧版の長時間セッション即削除・遅い結果保存失敗を再現し、新版は保護して保存成功。監視役停止中もprune拒否、599秒保持/601秒回収、実再開時の中断時刻解除を確認 |
+| 登録解除失敗の偽PASS | 各harnessで成功report/PASSより前に明示cleanupし、失敗を非zeroへ伝播。失敗対象だけatexitで再試行。実integration.mainを使う子Pythonの合成bundle/偽lsregister試験3件は旧実装をすべて拒否。対象限定・導入済み拒否・差替え拒否も維持 |
+
+初回の全体回帰では、背景化試験の開始前に通常ウィンドウを表示できない準備失敗と、子が解除済みのbuildアプリを親ゲートが二重解除する失敗を検出した。前者はread-onlyのOS状態で `CGSSessionScreenIsLocked=1`、前面が `com.apple.loginwindow` と確認した。固有Bundle IDへの変更や前面化APIでは解消せず、起動先の競合とは断定しない。ウィンドウの判定条件は緩和せず、解除後の再検証が必要である。後者は所有する各harnessの明示cleanupへ統一して重複解除を除いた。これらの初回失敗を合格に読み替えない。
+
+後続のQA統合点 `fe3093a` でも `bash tests/unit.sh` が合格し、導入復旧12件・QA境界11件を含めて確認した（`test-results/review26-final-unit.log`）。背景検査はread-onlyの開始前検査を追加し、ロック中の実機でApp/VMを起動せずexit 1、PASSなし、cases空を確認した（`test-results/app-background-20261017-050258-fe8d0a/report.json`）。解除後の背景化を含む全体ゲート再実行と、導入済み0.3.1の実利用経路は未回収であり、マージ・導入更新を保留する。
+
+局所証拠：`test-results/review26-before/slow-persist.json`、`test-results/review26-bin/slow-persist.json`、`test-results/lifecycle-3B23D317-16A2-47EA-8492-AA46987635DD/`、`test-results/session-jobs-20261017-044514-0dd5d5/`、`test-results/menu-tracking-20261017-045213-d2b2be/`、`test-results/permit-faults-20261017-045223/`。修正前後の追加証拠は `test-results/review26-evidence/` に保存した。外部公開・実スリープ・一般配布の未回収ゲートは継続する。
+
+## 2VM・OS所有構成の初期統合（2026-10-17、PR #25）
+
+この節はPR #25時点の記録である。後続の2026-10-15〜17の節も各時点の構成の履歴であり、旧host cloudflaredの公開成功を新しい通信VMの外部経路成功へ読み替えない。
+
+対象はApple Silicon・macOS 15.8.1・Swift 6.2.4、PR #25の製品ソース `14a90d5`、0.3.0 build 4のローカル署名版。同PR内の後続変更は試験ハーネス・導入スクリプト・CI・文書である。
 
 | 検証 | 結果と証拠 |
 | --- | --- |

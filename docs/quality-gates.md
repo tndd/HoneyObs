@@ -26,7 +26,7 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 
 `tests/installed_app.py` は導入済みアプリを対象にする別検証です。専用ゲートに自動混入させません。`tests/permit_faults.py` は現行buildの署名済み私有コピーとlocalhostを用い、mainの5秒停止・JS無限ループ、期限後HTTP拒否、VM回収と非復活を確認し、専用ゲートにも含めます。
 
-実アプリを起動するPython検査は `tests/qa_registry.py` にそのアプリだけを記録し、全caseの稼働・回収判定後、成功reportとPASS表示より前に `lsregister -u` の成功を明示確認します。失敗は非zeroへ伝播し、atexitでは失敗・中断時の残りだけを再試行します。専用ゲートのEXITでも自分のbuildバンドルだけを解除します。この作業treeのbuild/test-results内のHoneyObs以外、導入済みアプリ、別worktree、symlinkは受け付けず、登録一覧の探索や一括解除はしません。検査中のプロセスやVMをこの処理で終了させることもありません。
+実アプリを起動するPython検査は `tests/qa_registry.py` にそのアプリだけを記録し、全caseの稼働・回収判定後、成功reportとPASS表示より前に `lsregister -u` の成功を明示確認します。失敗は非zeroへ伝播し、atexitでは失敗・中断時の残りだけを再試行します。専用ゲートのEXITはゲート排他だけを解除し、子が解除済みのアプリを二重に解除しません。この作業treeのbuild/test-results内のHoneyObs以外、導入済みアプリ、別worktree、symlinkは受け付けず、登録一覧の探索や一括解除はしません。検査中のプロセスやVMをこの処理で終了させることもありません。
 
 ## 製品と検証の境界
 
@@ -54,7 +54,7 @@ CI定義の追加とGitHub上の実行成功は別です。ローカル検証、
 
 `tests/session_jobs.py` はVMなしの実launchd相互回収を検証します。`tests/session_ownership.py --egress-fixture` は `EGRESS_TESTING` の専用アプリに対し、UI・監視役・各VM補助プロセスのSIGKILL/SIGSTOPを外部から観測します。後処理で終了させたものを製品の回収成功に数えません。各試験は同じ実行先を上書きせず、署名した私有アプリコピーを使います。
 
-`tests/app_background.py` は通常GUIの自ウィンドウだけを最小化・非表示にします。追加のJSによる状態注入をせず、ネイティブのfreshness、HTTP応答、OSが持つUUID付きVM helperを突き合わせます。他アプリ・画面ロック・実スリープを操作しません。
+`tests/app_background.py` は通常GUIの自ウィンドウだけを最小化・非表示にします。開始前にOSのセッション状態を読み、画面ロック中・コンソール以外・取得不能なら理由をreportへ記録し、App/VMを起動せず非zeroで中断します。解除後は同じ検査を再実行し、未完走をPASSへ読み替えません。追加のJSによる状態注入をせず、ネイティブのfreshness、HTTP応答、OSが持つUUID付きVM helperを突き合わせます。他アプリ・画面ロック・実スリープを操作しません。
 
 `tests/menu_integration.py` は私有コピーの実WKWebView・観測VMでNSMenuを4.2秒保持し、実tracking mode内でUI/guest時刻と有効permitが進み、既存の所有PID/誕生identity・両jobを維持したまま追跡中と終了後のlocalhost HTTPが応答することを確認します。メニュー開始は元TimerとGCD main blockを抜けてから行い、終了後は実VM helperと所有processの消滅・QA登録解除を成功記録の前に確認します。
 
