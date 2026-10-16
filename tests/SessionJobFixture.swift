@@ -19,7 +19,9 @@ func safetyTime() -> Double { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW))
             while !FileManager.default.fileExists(atPath: directory.appendingPathComponent("fixture-quit").path) {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.02))
             }
-            client.finish()
+            try? SessionOwnership.save(["ready":true], directory.appendingPathComponent("finish-started.json"))
+            let acknowledged = client.finish()
+            try? SessionOwnership.save(["acknowledged":acknowledged], directory.appendingPathComponent("finish-result.json"))
         }
     }
 }

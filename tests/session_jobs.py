@@ -55,7 +55,7 @@ for sources, target in [(['Sources/HoneyObs/SessionOwnership.swift', 'tests/Sess
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', *sources, '-o', str(target)], cwd=ROOT, check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True, capture_output=True)
 
-for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke']:
+for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke', 'finish-delayed-ack', 'finish-no-ack']:
     run = OUT / fault
     run.mkdir(mode=0o700)
     owner = {}
@@ -68,6 +68,21 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
             start = time.monotonic()
             if fault == 'normal':
                 (run / 'fixture-quit').touch()
+            elif fault in ['finish-delayed-ack', 'finish-no-ack']:
+                monitor = owner['ownerPID']
+                current = command('/bin/ps', '-p', str(monitor), '-o', 'command=').stdout.strip()
+                assert current.startswith(str(HELPER) + ' '), current
+                os.kill(monitor, signal.SIGSTOP)
+                time.sleep(.3)  # clientが最後の通常leaseを書いた後もmonitorからACKは返らない。
+                (run / 'fixture-quit').touch()
+                wait(lambda: read(run / 'finish-started.json').get('ready'))
+                if fault == 'finish-delayed-ack':
+                    time.sleep(.08)
+                    assert alive(owner['clientPID']), '終端ACK前にclientがFDを閉じて退出しています'
+                else:
+                    wait(lambda: (run / 'finish-result.json').exists(), 1.5)
+                    assert read(run / 'finish-result.json').get('acknowledged') is False
+                os.kill(monitor, signal.SIGCONT)
             elif fault == 'cross-revoke':
                 (run / 'fixture-revoke').touch()
                 os.kill(owner['ownerPID'], signal.SIGTERM)
@@ -80,7 +95,9 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
             wait(lambda: gone(owner), 10)
             REPORT['cases'][fault] = {'allGoneWithin': round(time.monotonic() - start, 3), 'beforeTestCleanup': True}
             wrapper.wait(timeout=5)
-            assert wrapper.returncode == (0 if fault == 'normal' else 1), wrapper.returncode
+            assert wrapper.returncode == (0 if fault in ['normal', 'finish-delayed-ack'] else 1), wrapper.returncode
+            if fault in ['normal', 'finish-delayed-ack']:
+                assert read(run / 'finish-result.json').get('acknowledged'), '終端ACKを確認できません'
             print(fault + ': PASS', flush=True)
         except BaseException as error:
             REPORT['cases'][fault] = {'failed': repr(error), 'owner': owner,

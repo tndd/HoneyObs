@@ -339,6 +339,8 @@ enum SessionOwnership {
                     let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
                     if next == 0 && expiry == 1 {
                         guard uiReady else { invalid = true; break }
+                        // GUIはこの終端ACKを受け取るまでFDを保持する。前のleaseへのACKと競合させない。
+                        guard frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) == 16 else { invalid = true; break }
                         cleanExit = true; reason = "client-normal-exit"; break monitorLoop
                     }
                     if next == 0 && expiry == 0 {
@@ -365,6 +367,11 @@ enum SessionOwnership {
         // unlink自体をプロセス・VMの回収証明には使わない。
         removeSocketDirectory(temporary)
         if client == nil, let pid = jobPID(clientService), let identity = birth(pid) { client = pid; clientBirth = identity }
+        if cleanExit, let client, let clientBirth {
+            // 終端ACKを読んで自然退出する猶予。固着した本体はこの期限後にOS回収する。
+            let end = safetyTime() + 1
+            while birth(client) == clientBirth, safetyTime() < end { usleep(5_000) }
+        }
         _ = control(["bootout", clientService])
         let gone = !attemptedClientBootstrap || waitForDeath(clientService, pid: client, identity: clientBirth)
         if gone {
@@ -383,7 +390,7 @@ final class SessionClient {
     private let temporary: URL, record: URL, directory: URL
     private var timer: Timer?, sequence: UInt64 = 0, acknowledged: UInt64 = 0
     private var issued: [UInt64: UInt64] = [:], pending = Data(), deadline = safetyTime() + 3
-    private var revoked = false, ready = false, finished = false
+    private var revoked = false, ready = false, finished = false, finishAcknowledged = false
     init(arguments: [String], directory: URL) throws {
         guard let index = arguments.firstIndex(of: "--session-client"), index + 6 < arguments.count,
               getppid() == 1, getpgrp() == getpid(), let launcher = pid_t(arguments[index + 5]) else { throw POSIXError(.EPERM) }
@@ -412,12 +419,28 @@ final class SessionClient {
         let frame = Data(repeating: 0, count: 16)
         if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { revoke() }
     }
-    func finish() {
-        guard ready, !revoked, !finished else { return }; finished = true
+    @discardableResult func finish() -> Bool {
+        guard ready, !revoked, !finished else { return finishAcknowledged }; finished = true
         timer?.invalidate(); timer = nil
         var control: UInt64 = 0, cleanExit: UInt64 = 1
         var frame = withUnsafeBytes(of: &control) { Data($0) }; frame.append(withUnsafeBytes(of: &cleanExit) { Data($0) })
-        _ = frame.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+        guard frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) == 16 else { return false }
+        // 終端待機は通常leaseを延長しない。旧ACKを捨てず、発行済み値と照合してから終端ACKを受ける。
+        let end = min(deadline, safetyTime() + 1)
+        while safetyTime() < end {
+            guard SessionSocket.drain(fd, into: &pending) else { return false }
+            while pending.count >= 16 {
+                let response = Data(pending.prefix(16)); pending.removeFirst(16)
+                let next = response.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+                let expiry = response.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
+                if next == 0 && expiry == 1 { finishAcknowledged = true; return true }
+                let now = safetyTime(), expires = Double(expiry) / 1_000_000_000
+                guard next > acknowledged, issued[next] == expiry, expires > now, expires <= now + 3.01 else { return false }
+                acknowledged = next; issued = issued.filter { $0.key > next }
+            }
+            usleep(5_000)
+        }
+        return false
     }
     private func revoke() {
         guard !revoked else { return }; revoked = true; timer?.invalidate(); timer = nil
