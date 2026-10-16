@@ -19,6 +19,7 @@ final class ObservationDrain {
         timer = Timer.scheduledTimer(withTimeInterval:max(0.001,budget),repeats:false) { [weak self] _ in self?.finish("取得期限") }
         next()
     }
+    func cancel() { finish("停止処理中断") }
     private func next() {
         guard !finished else { return }
         guard pages < 40, ProcessInfo.processInfo.systemUptime-started < budget else { finish("取得期限"); return }
