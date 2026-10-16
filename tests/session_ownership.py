@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """私有launchd job、実VZ/XPC所有、故障直後のOS回収を外部から検証する。"""
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -50,10 +51,31 @@ def process(pid):
     return result.stdout.strip()
 
 
-def alive(pid):
-    result = command('/bin/ps', '-p', str(pid), '-o', 'stat=')
-    return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
+class BSDInfo(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in ['flags', 'status', 'xstatus', 'pid', 'ppid', 'uid', 'gid', 'ruid', 'rgid', 'svuid', 'svgid', 'reserved']] + [
+        ('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32)] + [
+        (name, ctypes.c_uint32) for name in ['nfiles', 'pgid', 'jobc', 'tty', 'tpgid']] + [
+        ('nice', ctypes.c_int32), ('start_sec', ctypes.c_uint64), ('start_usec', ctypes.c_uint64)]
 
+
+LIBPROC = ctypes.CDLL('/usr/lib/libproc.dylib')
+LIBPROC.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+LIBPROC.proc_pidinfo.restype = ctypes.c_int
+
+
+def kernel_info(pid):
+    info = BSDInfo()
+    return info if LIBPROC.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info) else None
+
+
+def alive(pid):
+    info = kernel_info(pid)
+    return info is not None and info.status != 5  # SZOMB has already stopped executing.
+
+
+_self = kernel_info(os.getpid())
+assert _self is not None and _self.pid == os.getpid() and _self.uid == os.getuid() and _self.pgid == os.getpgrp()
+assert abs(time.time() - _self.start_sec) < 60, 'proc_bsdinfo ABIまたは時計を確認できません'
 
 def members(pgid):
     result = command('/bin/ps', '-axo', 'pid=,pgid=,stat=,command=')
@@ -87,8 +109,13 @@ def helpers(client, run, allow_empty=False):
     for pid, service in owned:
         pid = int(pid)
         identity = process(pid)
+        if allow_empty and '/Virtualization.framework/' not in identity:
+            return []  # launchd publishes the service while xpcproxy is still exec'ing it.
         assert '/Virtualization.framework/' in identity, identity
+        info = kernel_info(pid)
+        assert info is not None
         entries.append({'pid': pid, 'service': service, 'identity': identity,
+                        'kernelBirth': f'{info.start_sec}:{info.start_usec}',
                         'birth': command('/bin/ps', '-p', str(pid), '-o', 'lstart=').stdout.strip(),
                         'command': command('/bin/ps', '-p', str(pid), '-o', 'command=').stdout.strip()})
     return entries
@@ -149,8 +176,12 @@ for fault in faults:
         start = time.monotonic(); timeline = {}
         def observe_stop():
             while not stop_observer.is_set():
+                elapsed = round(time.monotonic() - start, 3)
                 if read(run / 'state.json').get('stopping') and 'stopRequestedWithin' not in timeline:
-                    timeline['stopRequestedWithin'] = round(time.monotonic() - start, 3)
+                    timeline['stopRequestedWithin'] = elapsed
+                for key, pid in [('clientGoneWithin', client), ('monitorGoneWithin', monitor)] + [(entry['role'] + 'HelperGoneWithin', entry['pid']) for entry in witness]:
+                    if key not in timeline and not alive(pid):
+                        timeline[key] = elapsed
                 time.sleep(.025)
         observer = threading.Thread(target=observe_stop, daemon=True); observer.start()
         if '-helper-' in fault:
@@ -158,6 +189,8 @@ for fault in faults:
             target = next(entry for entry in witness if entry['role'] == role)
             current = command('/bin/ps', '-p', str(target['pid']), '-o', 'command=').stdout.strip()
             current_birth = command('/bin/ps', '-p', str(target['pid']), '-o', 'lstart=').stdout.strip()
+            info = kernel_info(target['pid'])
+            assert info is not None and f'{info.start_sec}:{info.start_usec}' == target['kernelBirth']
             assert current == target['command'] and current_birth == target['birth'] and '/Virtualization.framework/' in current, target
             os.kill(target['pid'], signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
         elif fault == 'normal-stop':
@@ -223,6 +256,8 @@ for fault in faults:
             resource_elapsed = time.monotonic() - start
         stop_observer.set(); observer.join(timeout=1)
         wrapper.wait(timeout=12)
+        if fault in ['normal-stop', 'startup-stop']:
+            assert wrapper.returncode == 0, wrapper.returncode
         wait(lambda: command('/bin/launchctl', 'print', service).returncode != 0)
         monitor_service = owner.get('ownerService')
         assert monitor_service, 'monitor OS job identityが所有記録にありません'
@@ -240,7 +275,7 @@ for fault in faults:
                                   'allRecoveredWithin': round(all_gone_elapsed, 3), 'bothJobsRemoved': True, 'newAfterExpiry': late,
                                   'stopRequestedWithin': timeline.get('stopRequestedWithin'),
                                   'recoveredAfterStopRequest': round(resource_elapsed - timeline['stopRequestedWithin'], 3) if 'stopRequestedWithin' in timeline else None,
-                                  'cooperativeHelperStop': cooperative_helper_stop,
+                                  'cooperativeHelperStop': cooperative_helper_stop, 'timeline': timeline,
                                   'directVZOwnerGone': True, 'monitorGone': True, 'xpcHelpersGone': True,
                                   'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True}
         print(fault + ': PASS', flush=True)
