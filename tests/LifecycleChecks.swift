@@ -1,7 +1,7 @@
 import Cocoa
 import Virtualization
 
-// 実VMを使い、停止API境界の失敗・無応答だけを注入する。製品にテストコマンドは追加しない。
+// 実VMを使い、停止API・保存I/O境界だけを注入する。製品にテストコマンドは追加しない。
 @main struct LifecycleChecks {
     static func wait(_ description: String, seconds: Double = 12, until: () -> Bool) {
         let deadline = Date().addingTimeInterval(seconds)
@@ -30,6 +30,26 @@ import Virtualization
             precondition(value.canStart && !value.isActive)
         }
         func record(_ name: String) { checks.append(name); print(name + ": PASS") }
+        func command(_ executable:String,_ arguments:[String]) -> String {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath:executable); process.arguments = arguments
+            process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+            try! process.run(); let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+            return String(data:data,encoding:.utf8)?.trimmingCharacters(in:.whitespacesAndNewlines) ?? ""
+        }
+        func helperIdentity(_ pid:String) -> String {
+            let text = command("/bin/ps",["-p",pid,"-o","stat=,lstart=,command="])
+            return text.hasPrefix("Z") ? "" : text
+        }
+        func helpers() -> [[String:String]] {
+            let domain = command("/bin/launchctl",["print","pid/\(getpid())"])
+            let pattern = try! NSRegularExpression(pattern:#"(?m)^\s+(\d+)\s+\S+\s+(com\.apple\.Virtualization\.VirtualMachine\.[A-F0-9-]+)\s*$"#)
+            return pattern.matches(in:domain,range:NSRange(domain.startIndex...,in:domain)).compactMap { match in
+                let pid = String(domain[Range(match.range(at:1),in:domain)!]), identity = helperIdentity(pid)
+                guard identity.contains("/Virtualization.framework/") else { return nil }
+                return ["pid":pid,"identity":identity,"service":String(domain[Range(match.range(at:2),in:domain)!])]
+            }
+        }
 
         do {
             let value = try engine("start-stop")
@@ -85,6 +105,56 @@ import Virtualization
             value.stop(reason: "検証終了")
             stopped(value)
             record("停止無応答・期限・古い完了通知の無効化")
+        }
+        do {
+            let entered = DispatchSemaphore(value:0), release = DispatchSemaphore(value:0)
+            weak var stoppedVM:VZVirtualMachine?
+            var stopCalled = false
+            let value = try Engine(directory:output.appendingPathComponent("slow-final-persist"),resources:resources,
+                stopMachine:{ vm,done in
+                    stopCalled = true; stoppedVM = vm
+                    vm.stop { error in done(error.map { .failure($0) } ?? .success(())) }
+                },persistFinal:{ data,url in
+                    precondition(!Thread.isMainThread)
+                    entered.signal(); precondition(release.wait(timeout:.now()+6) == .success)
+                    try data.write(to:url,options:.atomic)
+                })
+            ready(value)
+            let ownedHelpers = helpers(); precondition(!ownedHelpers.isEmpty,"実VZ helperを取得できない")
+            let started = ProcessInfo.processInfo.systemUptime
+            value.stop(reason:"最終保存のI/O停止")
+            wait("保存を待ってVM停止が始まらない",seconds:3) { stopCalled }
+            precondition(entered.wait(timeout:.now()) == .success,"最終保存に到達していない")
+            wait("最終保存中に実VMを回収できない",seconds:3) { stoppedVM == nil }
+            wait("保存I/O待ち中にVZ helperが残存",seconds:3) { ownedHelpers.allSatisfy { helperIdentity($0["pid"]!) != $0["identity"]! } }
+            precondition(!value.shutdownComplete && !value.canStart,"保存I/Oが残るまま停止完了とした")
+            let vmStopBeforeWriterReleased = ProcessInfo.processInfo.systemUptime-started
+            release.signal(); stopped(value)
+            let receipt = try JSONSerialization.jsonObject(with:Data(contentsOf:value.directory.appendingPathComponent("final-observation.json"))) as! [String:Any]
+            precondition(receipt["status"] as? String == "partial" && receipt["sealed"] as? Bool == false)
+            precondition(receipt["reason"] as? String == "取得期限")
+            try JSONSerialization.data(withJSONObject:["vmStoppedWhileWriteBlocked":true,"helpersGoneBeforeWriteRelease":true,"helpersBefore":ownedHelpers,"seconds":vmStopBeforeWriterReleased,"receipt":receipt],options:.prettyPrinted)
+                .write(to:value.directory.appendingPathComponent("slow-persist-proof.json"))
+            record("保存I/O中の期限・実VM先行回収・再開禁止・遅着非確定")
+        }
+        do {
+            let entered = DispatchSemaphore(value:0), release = DispatchSemaphore(value:0)
+            let value = try Engine(directory:output.appendingPathComponent("persist-after-stop-timeout"),resources:resources,
+                stopLimit:0.3,testing:true,persistFinal:{ data,url in
+                    entered.signal(); precondition(release.wait(timeout:.now()+5) == .success)
+                    try data.write(to:url,options:.atomic)
+                })
+            ready(value); value.stop(reason:"保存I/Oが停止期限も超過")
+            wait("停止期限超過を返さない",seconds:3) { value.phase == "停止失敗" }
+            precondition(entered.wait(timeout:.now()) == .success)
+            var retry:Bool?
+            value.stop(reason:"保存回収前の再試行") { retry=$0 }
+            precondition(retry == false && !value.shutdownComplete && !value.canStart)
+            value.start(publish:false); precondition(!value.isActive)
+            release.signal()
+            wait("古い保存I/Oを回収できない") { value.testingSnapshot["finalDrainPending"] as? Bool == false }
+            value.stop(reason:"保存回収後の再試行"); stopped(value)
+            record("保存I/Oが停止期限を超えても参照保持・再試行と再開の拒否")
         }
         do {
             var suppressReplies = false
