@@ -78,7 +78,8 @@ final class SessionArchive {
         var old = stat(); let target = directory.appendingPathComponent(name)
         let previous = lstat(target.path,&old) == 0 && old.st_mode & S_IFMT == S_IFREG ? old.st_size : 0
         // atomic書き込みの一時的な二重領域も8MiB内に収める。
-        guard try Self.size(directory) + Int64(bytes) <= 8 * 1024 * 1024 else {
+        // 別キューの二つの256KiBコンソールと小さな所有receiptのため1MiBを残す。
+        guard try Self.size(directory) + Int64(bytes) <= 7 * 1024 * 1024 else {
             throw Self.failure("セッションの保存予算を超えました（既存\(previous)bytes）")
         }
     }

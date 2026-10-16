@@ -16,4 +16,7 @@ test-results/unit-bin/launch-options
 swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveChecks.swift \
   -o test-results/unit-bin/session-archive
 test-results/unit-bin/session-archive
+swiftc -swift-version 5 Sources/HoneyObs/BoundedConsole.swift tests/BoundedConsoleChecks.swift \
+  -o test-results/unit-bin/bounded-console
+test-results/unit-bin/bounded-console
 python3 tests/install_checks.py
