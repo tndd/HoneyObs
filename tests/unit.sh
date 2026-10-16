@@ -25,4 +25,5 @@ test-results/unit-bin/session-archive-lock
 swiftc -swift-version 5 Sources/HoneyObs/BoundedConsole.swift tests/BoundedConsoleChecks.swift \
   -o test-results/unit-bin/bounded-console
 test-results/unit-bin/bounded-console
+bash tests/console_capture.sh
 python3 tests/install_checks.py

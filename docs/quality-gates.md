@@ -28,7 +28,7 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 
 通常起動では `HONEYOBS_PROBE_TARGETS` を採用せず、`command` と `ui-command` を操作入力として読みません。owner/clientが引き継ぐ内部保存先は検証モードを有効化しません。起動オプションのpure検査と、製品App/Engineへ渡す境界の実機検査を区別します。
 
-独立Python自己ペネは2か所の起動処理だけを差し替えた専用Runnerを使います。HTTP、Relay、VM、観測実装は製品と共通ですが、通常製品Appの起動・所有プロセス・終了経路の証明にはしません。
+独立Python自己ペネは製品EngineのlocalExerciseを直接リンクした専用Runnerを使います。起動処理のソース置換は行いません。UIのfixture、独立したHTTP/ログ突合、通常アプリの内蔵自己ペネは別々の証拠として記録します。
 
 ## 普段のMacアプリとしての挙動
 
@@ -41,3 +41,13 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 ## 結果の扱い
 
 CI定義の追加とGitHub上の実行成功は別です。ローカル検証、CI、実MacのVM、製品GUI、導入済みアプリ、実スリープ、公開経路をそれぞれ報告します。停止要求・プロセス終了・VM回収・公開停止を一つの成功状態へまとめません。ローカル証跡は `test-results/`、CI画面失敗時の画像は7日間のartifactに保存します。IPを含む実VMログを自動で公開artifactへアップロードしません。
+
+## 二台VMと故障注入の追加ゲート
+
+`tests/egress.sh --vm` は通信VM単体の禁止操作・固定API・TLS検査・起動途中停止を、`tests/egress_engine.sh` は製品Engineから両実VMをつなぐlocalhost fake edgeを検証します。実Cloudflare API・TLSの成功は証明しません。
+
+`tests/session_jobs.py` はVMなしの実launchd相互回収を検証します。`tests/session_ownership.py --egress-fixture` は `EGRESS_TESTING` の専用アプリに対し、UI・監視役・各VM補助プロセスのSIGKILL/SIGSTOPを外部から観測します。後処理で終了させたものを製品の回収成功に数えません。各試験は同じ実行先を上書きせず、署名した私有アプリコピーを使います。
+
+`tests/app_background.py` は通常GUIの自ウィンドウだけを最小化・非表示にします。追加のJSによる状態注入をせず、ネイティブのfreshness、HTTP応答、OSが持つUUID付きVM helperを突き合わせます。他アプリ・画面ロック・実スリープを操作しません。
+
+新しい最終観測・保存排他・ログ上限の検査は `tests/unit.sh`、URLの分割とログ回転は `tests/console_capture.sh` に含めます。一般配布の署名ゲートは `python3 scripts/check_bundle.py --distribution` で明示し、Developer IDを用意できない現在の環境ではBLOCKEDとします。
