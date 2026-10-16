@@ -3,7 +3,7 @@
 import json
 import subprocess
 import time
-from integration import APP, ROOT, read, wait, alive, curl
+from integration import APP, ROOT, read, wait, alive, curl, xpc_helpers, bootout_owned
 
 
 def main():
@@ -34,6 +34,7 @@ def main():
             capture('empty.png')
             command('public')
             public = wait(lambda: s if (s := state()).get('phase') == '公開中' else None, 240)
+            helpers = xpc_helpers(public['pid'])
             status, _, _ = curl(public['url'] + '/login', '-X', 'POST')
             assert status == 401
             shown = wait(lambda: s if (s := ui()).get('request') == 'POST /login' else None, 20)
@@ -53,8 +54,7 @@ def main():
             wait(lambda: ui().get('phase') == '停止完了' and ui().get('canStart'), 20)
             assert ui()['rows'] >= 2 and ui()['request'] == 'POST /login'
             assert ui()['packets'] == 0 and ui()['url'] == '公開URLなし'
-            guard = read(directory / 'watchdog.json')
-            wait(lambda: not alive(guard['watchdogPID']) and not alive(guard['tunnelPID']), 10)
+            wait(lambda: all(not alive(pid) for pid in helpers), 10)
             status, body, _ = curl(public['url'] + '/honeyobs-test-after-dashboard-stop')
             assert body != b'Not found\n'
             capture('stopped.png')
@@ -75,9 +75,7 @@ def main():
                 process.terminate()
                 try: process.wait(timeout=8)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
-            guard = read(directory / 'watchdog.json')
-            if guard:
-                wait(lambda: not alive(guard['watchdogPID']) and not alive(guard['tunnelPID']), 10)
+            bootout_owned(directory)
             (directory / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print('画面と記録:', directory)
 
