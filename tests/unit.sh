@@ -13,4 +13,7 @@ test-results/unit-bin/permit
 swiftc -swift-version 5 Sources/HoneyObs/LaunchOptions.swift tests/LaunchOptionsChecks.swift \
   -o test-results/unit-bin/launch-options
 test-results/unit-bin/launch-options
+swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveChecks.swift \
+  -o test-results/unit-bin/session-archive
+test-results/unit-bin/session-archive
 python3 tests/install_checks.py

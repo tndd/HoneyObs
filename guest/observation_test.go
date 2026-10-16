@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -10,6 +11,61 @@ import (
 	"testing"
 	"time"
 )
+
+func TestFinalObservationFenceAndTimeout(t *testing.T) {
+	for _, incomplete := range []bool{false, true} {
+		resetObservations()
+		t.Setenv("ORIGIN_HOST", "expected.invalid")
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted := make(chan struct{}, 1)
+		s := &http.Server{Handler: http.HandlerFunc(decoy), ConnContext: observationContext, ConnState: func(c net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				accepted <- struct{}{}
+			}
+			observationState(c, state)
+		}}
+		f := observationFinalizer{server: s, done: make(chan struct{})}
+		go s.Serve(&observingListener{Listener: l})
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if incomplete {
+			io.WriteString(c, "GET / HTTP/1.1\r\nHost: ")
+			// accept済みを待ち、Shutdownが未登録接続を閉じた場合と区別する。
+			select {
+			case <-accepted:
+			case <-time.After(time.Second):
+				t.Fatal("accept待機の期限超過")
+			}
+		} else {
+			io.WriteString(c, "GET /last HTTP/1.1\r\nHost: expected.invalid\r\n\r\n")
+			io.Copy(io.Discard, c)
+			c.Close()
+		}
+		start := time.Now()
+		complete := f.finalize()
+		if complete == incomplete || time.Since(start) > 400*time.Millisecond {
+			t.Fatal("最終観測の保証または期限が不正", complete)
+		}
+		if !incomplete && snapshot(0, 65534)["total"].(uint64) != 1 {
+			t.Fatal("最後の要求を取得していない")
+		}
+		c.Close()
+		s.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = s.Shutdown(ctx)
+		cancel()
+		observationConnections.Wait()
+		// 時間切れは後から完全取得へ昇格しない。
+		if f.finalize() != complete {
+			t.Fatal("最終結果が変化した")
+		}
+	}
+}
 
 func resetObservations() {
 	events.Lock()

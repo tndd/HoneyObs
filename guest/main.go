@@ -136,7 +136,13 @@ func control(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
-	json.NewEncoder(w).Encode(snapshot(after, os.Getuid()))
+	finalized := false
+	if r.URL.Query().Get("finalize") == "1" {
+		finalized = decoyFinalizer.finalize()
+	}
+	page := snapshot(after, os.Getuid())
+	page["finalized"] = finalized
+	json.NewEncoder(w).Encode(page)
 }
 
 func serve() {
@@ -151,11 +157,16 @@ func serve() {
 		s := &http.Server{Handler: v.handler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 4 * time.Second, WriteTimeout: 4 * time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 4096}
 		var listener net.Listener = l
 		if v.port == 7000 {
+			decoyFinalizer.server = s
 			listener = &observingListener{Listener: l}
 			s.ConnContext = observationContext
 			s.ConnState = observationState
 		}
-		go func() { log.Fatal(s.Serve(listener)) }()
+		go func() {
+			if err := s.Serve(listener); err != nil && err != http.ErrServerClosed {
+				log.Fatal(err)
+			}
+		}()
 	}
 	fmt.Println("HONEYOBS_READY uid=", os.Getuid())
 	select {}
