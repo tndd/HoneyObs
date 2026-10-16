@@ -44,11 +44,15 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm test
+      - name: 自己ペネの応答表示・中止・完了後の復帰
+        run: node tests/live_dashboard.cjs
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: dashboard-browser
-          path: test-results/dashboard-browser
+          path: |
+            test-results/dashboard-browser
+            test-results/live-dashboard
           retention-days: 7
 
   swift:

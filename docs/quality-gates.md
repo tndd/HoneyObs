@@ -6,11 +6,13 @@ PRとmainへのpushでは次の3ジョブを実行します。必要な権限は
 
 | ジョブ | 検査する範囲 | 証明しない範囲 |
 | --- | --- | --- |
-| ゲスト | Ubuntuで製品Go全体の `go test -race -count=1 ./...` | Apple Virtualization.frameworkでの実行、Mac側の経路 |
+| ゲスト | Ubuntuで観測VMのGo module全体の `go test -race -count=1 ./...`、通信VMのLinux ARM64ビルド | Apple Virtualization.frameworkでの実行、Mac側の経路、通信VMの実seccomp |
 | 画面 | 固定fixtureでPlaywright、行選択、外来文字列、保持上限、外部通信なし | 実WKWebView、実VM、実ログとの照合 |
 | Swift・導入 | 製品ObservationStoreと転送許可、LaunchOptions、導入/更新/失敗復旧の署名済みfixture、製品Swift全体の型検査、ビルドしたバンドルのブランド資産・ライセンス・開発署名 | VM生成、実導入済みアプリ、物理操作 |
 
 Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一時ディレクトリだけを使い、Launch Services登録をfixtureへ置き換えます。ユーザーのアプリと登録DBは変更しません。
+
+画面ジョブでは `tests/live_dashboard.cjs` も実行し、固定状態で右下シールド・応答と記録の分離・中止・完了後の復帰・縮小画面・動き軽減を確認します。
 
 ## 実Macの別ゲート
 
