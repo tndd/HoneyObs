@@ -80,13 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engine.save(["host":endpoint.host],name:"test-origin.json")
             }
             var state = engine.testingSnapshot
-            state.merge(["pid":getpid(),"windowMiniaturized":window?.isMiniaturized ?? false,
+            let native: [String:Any] = ["pid":getpid(),"windowMiniaturized":window?.isMiniaturized ?? false,
                          "appHidden":NSApp.isHidden,"windowVisible":window?.isVisible ?? false,
                          "appActive":NSApp.isActive,"activationPolicy":NSApp.activationPolicy().rawValue,
                          "windowKey":window?.isKeyWindow ?? false,"windowNumber":window?.windowNumber ?? 0,
                          "windowStyle":window?.styleMask.rawValue ?? 0,
                          "minimizeEnabled":window?.standardWindowButton(.miniaturizeButton)?.isEnabled ?? false,
-                         "lastAction":lastTestAction]) { _,new in new }
+                         "lastAction":lastTestAction]
+            state.merge(native) { _,new in new }
             engine.save(state,name:"background-state.json")
             let command = engine.directory.appendingPathComponent("ui-command")
             if let value = try? String(contentsOf: command, encoding: .utf8) {
