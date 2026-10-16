@@ -25,10 +25,10 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     var shutdownComplete: Bool { !active && machine == nil && console == nil && streams.isEmpty && listeners.isEmpty && !healthPending && !stopping && !stopFailed && testPendingCount == 0 }
     var canStart: Bool { shutdownComplete }
     var requiresSessionRecovery: Bool { stopFailed }
+    private var acquiredURL = ""
     var publicURL: String {
-        guard let log = try? String(contentsOf: directory.appendingPathComponent("tunnel.log"), encoding: .utf8),
-              let range = log.range(of: "https://[a-z0-9-]+\\.trycloudflare\\.com", options: .regularExpression) else { return "" }
-        return String(log[range])
+        if acquiredURL.isEmpty, let value = console?.capturedValue { acquiredURL = value }
+        return acquiredURL
     }
     private var testPendingCount: Int {
         #if EGRESS_TESTING
@@ -48,7 +48,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     }
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
         guard canStart, originPort != 0, permit.valid else { completion(.failure(error("通信VMを開始できません"))); return }
-        active = true; failed = false; stopFailed = false; provisioned = false; edgeAttempts = []; lastHealthAt = 0; started = safetyTime(); startCallback = completion
+        active = true; acquiredURL = ""; failed = false; stopFailed = false; provisioned = false; edgeAttempts = []; lastHealthAt = 0; started = safetyTime(); startCallback = completion
         do {
             let config = VZVirtualMachineConfiguration(); config.cpuCount = 1; config.memorySize = 256 * 1024 * 1024
             let boot = VZLinuxBootLoader(kernelURL: resources.appendingPathComponent("vmlinuz"))
@@ -58,7 +58,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
             config.socketDevices = [VZVirtioSocketDeviceConfiguration()]; config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let log = directory.appendingPathComponent("tunnel.log")
-            console = try BoundedConsole(url: log) { [weak self] error in self?.fail("通信VMのログ保存失敗: " + error.localizedDescription) }
+            console = try BoundedConsole(url: log, capturePattern:EgressPolicy.publicURLPattern) { [weak self] error in self?.fail("通信VMのログ保存失敗: " + error.localizedDescription) }
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
             serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!.writer)
             config.serialPorts = [serial]; try config.validate()
@@ -180,6 +180,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
         guard let collector = console, !consoleClosing else { return }; consoleClosing = true
         collector.close { [weak self, weak collector] in
             guard let self, let collector, self.console === collector else { return }
+            if self.acquiredURL.isEmpty { self.acquiredURL = collector.capturedValue ?? "" }
             self.console = nil; self.consoleClosing = false; self.advanceStop()
         }
     }

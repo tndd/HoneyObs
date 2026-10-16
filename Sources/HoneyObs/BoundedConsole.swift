@@ -9,9 +9,13 @@ final class BoundedConsole {
     private var timer: DispatchSourceTimer?
     private var bytes = 0, closing = false, failed = false
     private let limit: Int
+    private let capturePattern: NSRegularExpression?
+    private var captureCarry = Data(), firstCapture: String?
+    var capturedValue: String? { queue.sync { firstCapture } }
     private let onFailure: ((Error) -> Void)?
-    init(url: URL, limit: Int = 262144, onFailure: ((Error) -> Void)? = nil) throws {
+    init(url: URL, limit: Int = 262144, capturePattern: String? = nil, onFailure: ((Error) -> Void)? = nil) throws {
         self.limit = max(limit,8192); self.onFailure = onFailure
+        self.capturePattern = try capturePattern.map { try NSRegularExpression(pattern:$0) }
         let fd = Darwin.open(url.path,O_CREAT|O_TRUNC|O_WRONLY|O_NOFOLLOW|O_CLOEXEC,0o600)
         guard fd >= 0 else { throw POSIXError(.EIO) }
         output = FileHandle(fileDescriptor:fd,closeOnDealloc:true)
@@ -30,6 +34,13 @@ final class BoundedConsole {
                     if errno == EAGAIN || errno == EINTR { return }; throw POSIXError(.EIO)
                 }
                 if n == 0 { return }
+                if firstCapture == nil, let capturePattern {
+                    let combined = captureCarry + Data(buffer.prefix(n))
+                    let text = String(decoding:combined,as:UTF8.self)
+                    if let match = capturePattern.firstMatch(in:text,range:NSRange(text.startIndex...,in:text)),
+                       let range = Range(match.range,in:text) { firstCapture = String(text[range]) }
+                    captureCarry = firstCapture == nil ? Data(combined.suffix(256)) : Data()
+                }
                 if failed { continue }
                 if bytes+n > limit { try output.truncate(atOffset:0); try output.seek(toOffset:0); bytes = 0 }
                 try output.write(contentsOf:Data(buffer.prefix(n))); bytes += n

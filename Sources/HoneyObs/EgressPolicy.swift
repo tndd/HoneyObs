@@ -3,6 +3,8 @@ import Foundation
 enum EgressPolicy {
     static let provisioningAddress = "104.16.230.132"
     static let provisioningServerName = "api.trycloudflare.com"
+    // 末尾の区切りまで見てから確定し、分割された .com.evil の前半をURLにしない。
+    static let publicURLPattern = "https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.trycloudflare\\.com(?=[\\s\\x1B|])"
     static let edgeAddress = "198.41.192.7"
     static let edgePort: UInt16 = 7844
     static let edgeServerName = "h2.cftunnel.com"
