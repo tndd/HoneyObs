@@ -3,6 +3,33 @@ import Network
 import Virtualization
 import Darwin
 
+// スリープ中も進む単調時計。壁時計の変更で許可を延命しない。
+func safetyTime() -> Double { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000 }
+
+// 上流の確認時刻に期限を結び付け、一度の失効を不可逆にする。
+final class ForwardingPermit {
+    private let lock = NSLock()
+    private let clock: () -> Double
+    private var until: Double
+    private var revoked = false
+    init(confirmedAt: Double, clock: @escaping () -> Double = safetyTime) {
+        self.clock = clock; until = confirmedAt + 3
+    }
+    var valid: Bool {
+        lock.lock(); defer { lock.unlock() }
+        if clock() >= until { revoked = true }; return !revoked
+    }
+    var deadline: Double { lock.lock(); defer { lock.unlock() }; return until }
+    func renew(confirmedAt: Double) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = clock()
+        if now >= until || confirmedAt + 3 <= now { revoked = true }
+        guard !revoked else { return false }
+        until = min(now + 3, confirmedAt + 3); return true
+    }
+    func revoke() { lock.lock(); revoked = true; lock.unlock() }
+}
+
 // 公開側からVMの固定ポートへの転送だけを行う。任意宛先の接続機能は持たない。
 final class Relay {
     private let client: NWConnection
@@ -10,14 +37,38 @@ final class Relay {
     private let queue = DispatchQueue(label: "honeyobs.relay")
     private var stopped = false
     private var received = 0
+    private let permit: ForwardingPermit?
+    private var permitTimer: DispatchSourceTimer?
+    private let guestLock = NSLock()
+    private var guestClosed = false
+    private func closeGuest() {
+        guestLock.lock(); defer { guestLock.unlock() }
+        if !guestClosed { guestClosed = true; guest.close() }
+    }
+    private func shutGuest() {
+        guestLock.lock(); defer { guestLock.unlock() }
+        if !guestClosed { Darwin.shutdown(guest.fileDescriptor, SHUT_RDWR) }
+    }
+    private var permitted: Bool { permit?.valid ?? true }
+
     private let finished: () -> Void
     private let rejected: (String) -> Void
 
-    init(client: NWConnection, guest: VZVirtioSocketConnection, rejected: @escaping (String) -> Void = { _ in }, finished: @escaping () -> Void) {
-        self.client = client; self.guest = guest; self.finished = finished; self.rejected = rejected
+    init(client: NWConnection, guest: VZVirtioSocketConnection, permit: ForwardingPermit? = nil, rejected: @escaping (String) -> Void = { _ in }, finished: @escaping () -> Void) {
+        self.client = client; self.guest = guest; self.permit = permit; self.finished = finished; self.rejected = rejected
     }
 
     func start() {
+        if permit != nil {
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(100))
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.permitted else { return }
+                self.client.cancel(); self.shutGuest()
+                self.queue.async { self.finish(reason: "permit_expired") }
+            }
+            permitTimer = timer; timer.resume()
+        }
         let fd = guest.fileDescriptor
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
         var timeout = timeval(tv_sec: 5, tv_usec: 0)
@@ -38,25 +89,26 @@ final class Relay {
             }
             let data = response
             self.queue.async {
-                if self.stopped { self.guest.close(); return }
-                if data.count > 65536 || data.isEmpty { self.finish(); self.guest.close(); return }
+                if self.stopped || !self.permitted { self.closeGuest(); return }
+                if data.count > 65536 || data.isEmpty { self.finish(); self.closeGuest(); return }
                 self.client.send(content: data, completion: .contentProcessed { _ in
-                    self.finish(); self.guest.close()
+                    self.finish(); self.closeGuest()
                 })
             }
         }
     }
 
     private func receive() {
-        guard !stopped else { return }
+        guard !stopped, permitted else { finish(reason: "permit_expired"); return }
         client.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, done, error in
-            guard !self.stopped else { return }
+            guard !self.stopped, self.permitted else { self.finish(reason: "permit_expired"); return }
             if let data, !data.isEmpty {
                 self.received += data.count
                 guard self.received <= 32768 else { self.finish(reason: "relay_input_limit"); return }
                 let ok = data.withUnsafeBytes { p -> Bool in
                     var offset = 0
                     while offset < p.count {
+                        guard self.permitted else { return false }
                         let n = Darwin.write(self.guest.fileDescriptor, p.baseAddress!.advanced(by: offset), p.count - offset)
                         if n <= 0 { return false }; offset += n
                     }; return true
@@ -70,11 +122,12 @@ final class Relay {
     private func finish(reason: String? = nil) {
         guard !stopped else { return }; stopped = true
         client.cancel()
-        Darwin.shutdown(guest.fileDescriptor, SHUT_RDWR)
+        permitTimer?.cancel(); permitTimer = nil
+        shutGuest()
         DispatchQueue.main.async { if let reason { self.rejected(reason) }; self.finished() }
     }
 
-    func cancel() { queue.async { self.finish() } }
+    func cancel() { client.cancel(); shutGuest(); queue.async { self.finish() } }
 }
 
 // VZのAPIはメインキューで呼び、ブロッキングI/Oは別キューへ逃がす。

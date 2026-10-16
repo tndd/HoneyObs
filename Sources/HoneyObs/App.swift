@@ -5,37 +5,58 @@ private var watchdogStop: sig_atomic_t = 0
 
 func watchdog(_ args: [String]) {
     guard args.count > 5, let parent = Int32(args[2]) else { exit(2) }
-    signal(SIGTERM) { _ in watchdogStop = 1 }
-    signal(SIGINT) { _ in watchdogStop = 1 }
+    signal(SIGTERM) { _ in watchdogStop = 1 }; signal(SIGINT) { _ in watchdogStop = 1 }
     signal(SIGPIPE, SIG_IGN)
-    let process = Process(); process.executableURL = URL(fileURLWithPath: args[4])
-    process.arguments = Array(args.dropFirst(5))
-    let output = Pipe()
-    process.standardOutput = output; process.standardError = output
+    for fd in [STDIN_FILENO, STDOUT_FILENO] { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+    var pending = Data(), sequence: UInt64 = 0, expires = 0.0
+    func receivePermit() -> Bool {
+        var bytes = [UInt8](repeating:0,count:512)
+        let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+        if count == 0 { return false }
+        if count < 0 && errno != EAGAIN && errno != EINTR { return false }
+        if count > 0 { pending.append(contentsOf:bytes.prefix(count)) }
+        while pending.count >= 16 {
+            let frame = Data(pending.prefix(16)); pending.removeFirst(16)
+            let next = frame.withUnsafeBytes { $0.loadUnaligned(as:UInt64.self) }
+            let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset:8,as:UInt64.self) }
+            let deadline = Double(expiry) / 1_000_000_000, now = safetyTime()
+            guard next > sequence, deadline > now, deadline <= now+3.01 else { return false }
+            sequence = next; expires = deadline
+            guard frame.withUnsafeBytes({ Darwin.write(STDOUT_FILENO,$0.baseAddress,$0.count) }) == 16 else { return false }
+        }
+        return expires == 0 || safetyTime() < expires
+    }
+    let startup = safetyTime()+2
+    while expires == 0 && safetyTime()<startup && watchdogStop==0 && getppid()==parent {
+        guard receivePermit() else { exit(2) }; usleep(20_000)
+    }
+    guard expires>safetyTime(), watchdogStop==0, getppid()==parent else { exit(2) }
+    let process = Process(); process.executableURL = URL(fileURLWithPath:args[4])
+    process.arguments = Array(args.dropFirst(5)); process.standardInput = FileHandle.nullDevice
+    let output = Pipe(); process.standardOutput = output; process.standardError = output
     let fd = output.fileHandleForReading.fileDescriptor
-    _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+    _ = fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)
     var logBytes = 0
     func drain() {
-        var buf = [UInt8](repeating: 0, count: 8192)
-        // ログで監視ループが占有されないよう、1回の回収量も制限する。
+        var bytes = [UInt8](repeating:0,count:8192)
         for _ in 0..<8 {
-            let n = Darwin.read(fd, &buf, buf.count)
-            if n <= 0 { return }
-            if logBytes + n > 262144 {
-                _ = ftruncate(STDOUT_FILENO, 0); _ = lseek(STDOUT_FILENO, 0, SEEK_SET); logBytes = 0
-            }
-            let data = Data(buf.prefix(n)); try? FileHandle.standardOutput.write(contentsOf: data); logBytes += n
+            let count = Darwin.read(fd,&bytes,bytes.count); if count<=0 { return }
+            if logBytes+count>262144 { _ = ftruncate(STDERR_FILENO,0); _ = lseek(STDERR_FILENO,0,SEEK_SET); logBytes=0 }
+            try? FileHandle.standardError.write(contentsOf:Data(bytes.prefix(count))); logBytes += count
         }
     }
-    do { try process.run() } catch { fputs("公開用プロセスの起動失敗\n", stderr); exit(1) }
-    let data = try! JSONSerialization.data(withJSONObject: ["watchdogPID":getpid(),"tunnelPID":process.processIdentifier,"parentPID":parent])
-    try? data.write(to: URL(fileURLWithPath: args[3]).appendingPathComponent("watchdog.json"), options: .atomic)
-    while process.isRunning && watchdogStop == 0 && getppid() == parent { drain(); usleep(100_000) }
+    do { try process.run() } catch { fputs("公開用プロセスの起動失敗\n",stderr); exit(1) }
+    let directory = URL(fileURLWithPath:args[3])
+    if let data = try? JSONSerialization.data(withJSONObject:["watchdogPID":getpid(),"tunnelPID":process.processIdentifier,"parentPID":parent]) {
+        try? data.write(to:directory.appendingPathComponent("watchdog.json"),options:.atomic)
+    }
+    while process.isRunning && watchdogStop==0 && getppid()==parent {
+        if !receivePermit() { break }; drain(); usleep(50_000)
+    }
     if process.isRunning { process.terminate() }
     for _ in 0..<20 { drain(); if !process.isRunning { break }; usleep(100_000) }
-    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-    process.waitUntilExit()
-    drain()
+    if process.isRunning { kill(process.processIdentifier,SIGKILL) }
+    process.waitUntilExit(); drain()
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -54,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(engine: Engine, headless: Bool, uiSmoke: Bool, uiPublicSmoke: Bool) {
         self.engine = engine; self.headless = headless; self.uiSmoke = uiSmoke; self.uiPublicSmoke = uiPublicSmoke
+        engine.requiresUIHeartbeat = !headless
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -105,6 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard?.refresh()
         if dashboardSmoke {
             dashboard?.testState()
+            if CommandLine.arguments.contains("--ui-exercise-smoke"), let endpoint = engine.exerciseEndpoint {
+                engine.save(["host":endpoint.host],name:"test-origin.json")
+            }
             let command = engine.directory.appendingPathComponent("ui-command")
             if let value = try? String(contentsOf: command, encoding: .utf8) {
                 try? FileManager.default.removeItem(at: command)
@@ -112,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case "capture": dashboard?.capture(to: engine.directory.appendingPathComponent("ui-capture.png"))
                 case "resize": window?.setContentSize(NSSize(width: 860, height: 650))
                 case "quit": NSApp.terminate(nil)
+                case "freeze-main": Thread.sleep(forTimeInterval:5)
+                case "freeze-ui": dashboard?.testFreezeUI()
                 case let action: dashboard?.testAction(action)
                 }
             }
