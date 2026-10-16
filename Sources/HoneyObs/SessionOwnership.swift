@@ -177,7 +177,7 @@ enum SessionOwnership {
         return false
     }
     static func registry(_ arguments: [String], directory: URL) -> URL {
-        arguments.contains("--test-mode") ? directory.deletingLastPathComponent().appendingPathComponent(".session-registry") :
+        arguments.contains("--test-mode") ? directory.appendingPathComponent(".session-registry") :
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("HoneyObs/OSSession")
     }
     static func removeSocketDirectory(_ directory: URL) {

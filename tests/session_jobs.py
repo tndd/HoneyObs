@@ -100,5 +100,39 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
                 except subprocess.TimeoutExpired:
                     wrapper.kill(); wrapper.wait()
 
+# 同じ親の二つのrunを並行起動しても、他方の回収記録を共有しない。
+parallel = []
+try:
+    for index in range(2):
+        run = OUT / ('independent-' + str(index)); run.mkdir(mode=0o700)
+        log = (run / 'launcher.log').open('w')
+        wrapper = subprocess.Popen([str(EXE), '--test-mode', '--run-directory', str(run)], stdout=log, stderr=log)
+        item = {'run': run, 'log': log, 'wrapper': wrapper, 'owner': {}}
+        parallel.append(item)
+        item['owner'] = wait(lambda: read(run / 'owner.json'), 15)
+        wait(lambda: read(run / 'launcher-ready.json').get('ready'))
+    assert len({item['owner']['ownerService'] for item in parallel}) == 2
+    assert all(alive(item['owner'][key]) for item in parallel for key in ['ownerPID', 'clientPID'])
+    assert all((item['run'] / '.session-registry').is_dir() for item in parallel)
+    for item in parallel:
+        (item['run'] / 'fixture-quit').touch()
+        wait(lambda: gone(item['owner']), 10)
+        item['wrapper'].wait(timeout=5)
+        assert item['wrapper'].returncode == 0
+    REPORT['cases']['independent-runs'] = {'twoSessionsAliveTogether': True, 'bothNormalExit': True, 'beforeTestCleanup': True}
+    print('independent-runs: PASS', flush=True)
+finally:
+    for item in parallel:
+        for key in ['clientService', 'ownerService']:
+            if key in item['owner']:
+                command('/bin/launchctl', 'bootout', item['owner'][key])
+        if item['wrapper'].poll() is None:
+            item['wrapper'].terminate()
+            try:
+                item['wrapper'].wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                item['wrapper'].kill(); item['wrapper'].wait()
+        item['log'].close()
+
 (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
 print('実launchdの相互回収（GUI/VMなし）: PASS', OUT)
