@@ -12,6 +12,7 @@ func safetyTime() -> Double { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW))
         let directory = URL(fileURLWithPath: args[index + 1])
         if !args.contains("--session-client") { exit(SessionOwnership.launch(args, directory: directory)) }
         let client = try SessionClient(arguments: args, directory: directory)
+        client.requiresRecovery = { FileManager.default.fileExists(atPath: directory.appendingPathComponent("fixture-revoke").path) }
         try SessionOwnership.save(["shutdownComplete": true, "vmPresent": false, "pid": getpid()], directory.appendingPathComponent("state.json"))
         client.markUIReady()
         withExtendedLifetime(client) {

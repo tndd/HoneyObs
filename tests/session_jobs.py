@@ -55,7 +55,7 @@ for sources, target in [(['Sources/HoneyObs/SessionOwnership.swift', 'tests/Sess
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', *sources, '-o', str(target)], cwd=ROOT, check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True, capture_output=True)
 
-for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop']:
+for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke']:
     run = OUT / fault
     run.mkdir(mode=0o700)
     owner = {}
@@ -68,6 +68,9 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
             start = time.monotonic()
             if fault == 'normal':
                 (run / 'fixture-quit').touch()
+            elif fault == 'cross-revoke':
+                (run / 'fixture-revoke').touch()
+                os.kill(owner['ownerPID'], signal.SIGTERM)
             else:
                 key = 'ownerPID' if fault.startswith('monitor') else 'clientPID'
                 executable = HELPER if key == 'ownerPID' else EXE

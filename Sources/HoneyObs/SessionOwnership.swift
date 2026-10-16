@@ -266,6 +266,9 @@ enum SessionOwnership {
                 usleep(20_000)
             }
         } catch { fputs("OS監視失敗: \(error)\n", stderr) }
+        // 相互bootoutが重なると双方がdeath待ち中にOS回収される。再接続口は先に閉じる。
+        // unlink自体をプロセス・VMの回収証明には使わない。
+        removeSocketDirectory(temporary)
         if client == nil, let pid = jobPID(clientService), let identity = birth(pid) { client = pid; clientBirth = identity }
         _ = control(["bootout", clientService])
         let gone = !attemptedClientBootstrap || waitForDeath(clientService, pid: client, identity: clientBirth)
@@ -323,6 +326,7 @@ final class SessionClient {
     }
     private func revoke() {
         guard !revoked else { return }; revoked = true; timer?.invalidate(); timer = nil
+        SessionOwnership.removeSocketDirectory(temporary)
         onRevoke()
         _ = SessionOwnership.control(["bootout", monitorService])
         let gone = SessionOwnership.waitForDeath(monitorService, pid: monitorPID, identity: monitorBirth)
