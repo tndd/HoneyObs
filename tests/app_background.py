@@ -94,6 +94,28 @@ def fresh(run):
     return value if valid else None
 
 
+def background_appearance(value, baseline, action):
+    if action == 'hide':
+        return 'hidden' if value.get('appHidden') is True else None
+    if value.get('windowMiniaturized') is True:
+        return 'dock-minimized'
+    if not value.get('stageManagerEnabled') or value.get('windowNumber') != baseline.get('windowNumber') or value.get('windowKey'):
+        return None
+    before, after = baseline.get('windowServerBounds', {}), value.get('windowServerBounds', {})
+    if all(before.get(key, 0) > 0 and 0 < after.get(key, 0) < before[key] * .65 for key in ['Width', 'Height']):
+        return 'stage-manager-thumbnail'
+    return None
+
+
+def restored(value, baseline, action):
+    if action == 'hide':
+        return value.get('appHidden') is False
+    if value.get('windowMiniaturized') is not False or value.get('windowNumber') != baseline.get('windowNumber'):
+        return False
+    before, after = baseline.get('windowServerBounds', {}), value.get('windowServerBounds', {})
+    return all(before.get(key, 0) > 0 and after.get(key, 0) >= before[key] * .85 for key in ['Width', 'Height'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', choices=['all', 'minimize', 'hide'], default='all')
@@ -118,13 +140,15 @@ def main():
                 state = wait(lambda: s if (s := read(run / 'state.json')).get('originPort') else None, 45)
                 port, host = state['originPort'], wait(lambda: read(run / 'test-origin.json').get('host'))
                 wait(lambda: fresh(run))
+                baseline = read(run / 'background-state.json')
+                assert baseline.get('windowServerBounds', {}).get('Width', 0) > 0, 'OSのwindow boundsがありません'
                 assert not state['url'] and not (run / 'tunnel.log').exists()
                 witness = helpers(pid)
                 held = socket.create_connection(('127.0.0.1', port), 1)
                 held.sendall(f'POST /login HTTP/1.1\r\nHost: {host}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx'.encode())
                 assert not select.select([held], [], [], .1)[0], '背景化前に低速接続が閉じています'
                 command(run, action)
-                wait(lambda: read(run / 'background-state.json').get(property_name) is True)
+                background_state = wait(lambda: value if background_appearance(value := read(run / 'background-state.json'), baseline, action) else None)
                 samples, cutoff, expired_at, held_closed_at = [], None, None, None
                 background_start = time.monotonic()
                 end = time.monotonic() + 8
@@ -158,7 +182,7 @@ def main():
                         break
                     time.sleep(.15)
                 command(run, restore)
-                wait(lambda: read(run / 'background-state.json').get(property_name) is False)
+                wait(lambda: restored(read(run / 'background-state.json'), baseline, action))
                 background_cutoff = cutoff is not None
                 if cutoff:
                     time.sleep(1)
@@ -180,6 +204,8 @@ def main():
                     wait(held_closed, 2)
                     held_closed_at = round(time.monotonic() - background_start, 3)
                 REPORT['cases'][action] = {'nativeState': read(run / 'background-state.json'), 'acceptedSamples': samples,
+                                          'baselineAppearance': baseline, 'backgroundAppearance': background_state,
+                                          'appearanceOracle': background_appearance(background_state, baseline, action),
                                           'stoppedState': cutoff, 'xpcOwnershipWitness': witness, 'xpcGoneBeforeCleanup': True,
                                           'heldClosedWithin': held_closed_at,
                                           'backgroundOutcome': 'safety-cutoff' if background_cutoff else 'continued-with-freshness'}
