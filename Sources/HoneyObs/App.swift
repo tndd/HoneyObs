@@ -89,6 +89,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          "minimizeEnabled":window?.standardWindowButton(.miniaturizeButton)?.isEnabled ?? false,
                          "lastAction":lastTestAction]
             state.merge(native) { _,new in new }
+            if let number = window?.windowNumber,
+               let windows = CGWindowListCopyWindowInfo(.optionIncludingWindow,CGWindowID(number)) as? [[String:Any]],
+               let bounds = windows.first?[kCGWindowBounds as String] as? [String:Any] {
+                state["windowServerBounds"] = bounds
+            }
+            state["stageManagerEnabled"] = UserDefaults(suiteName:"com.apple.WindowManager")?.bool(forKey:"GloballyEnabled") ?? false
             engine.save(state,name:"background-state.json")
             let command = engine.directory.appendingPathComponent("ui-command")
             if let value = try? String(contentsOf: command, encoding: .utf8) {
@@ -97,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
                 case "local-origin": engine.start(publish:false,localExercise:true)
                 case "minimize": window?.performMiniaturize(nil)
-                case "restore": window?.deminiaturize(nil)
+                case "restore": window?.deminiaturize(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
                 case "hide": NSApp.hide(nil)
                 case "show": NSApp.unhide(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
                 case "stop": engine.stop(reason:"検証からの停止")
