@@ -14,6 +14,7 @@ import socket
 import subprocess
 import time
 import uuid
+from qa_registry import register_app
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
@@ -130,6 +131,7 @@ def main():
         run.mkdir(mode=0o700)
         witness, held, owner = [], None, {}
         with (run / 'launcher.log').open('w') as log:
+            register_app(APP)
             wrapper = subprocess.Popen([str(EXE), '--test-mode', '--run-directory', str(run)], stdout=log, stderr=log)
             try:
                 native = wait(lambda: read(run / 'background-state.json'), 20)

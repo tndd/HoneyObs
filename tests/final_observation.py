@@ -12,6 +12,7 @@ import socket
 import subprocess
 import time
 import uuid
+from qa_registry import register_app
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -119,6 +120,7 @@ def main():
     launcher = held = None; witnesses = []
     log = (run / 'launcher.log').open('w')
     try:
+        register_app(app)
         launcher = subprocess.Popen([str(binary), '--test-mode', '--headless', '--local-origin', '--run-directory', str(run)], stdout=log, stderr=subprocess.STDOUT)
         def ready():
             state = read(run / 'state.json')

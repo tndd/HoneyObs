@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 from integration import APP, OUT, Session, read, wait, alive, bootout_owned
+from qa_registry import register_app
 
 
 def main():
@@ -13,6 +14,7 @@ def main():
     directory = OUT / 'terminate-starting'
     directory.mkdir(mode=0o700)
     with (directory / 'app.log').open('w') as log:
+        register_app(APP.parents[2])
         process = subprocess.Popen([str(APP), '--test-mode', '--headless', '--run-directory', str(directory)], stdout=log, stderr=log)
         try:
             wait(lambda: read(directory / 'state.json').get('active') is True)

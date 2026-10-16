@@ -27,3 +27,4 @@ swiftc -swift-version 5 Sources/HoneyObs/BoundedConsole.swift tests/BoundedConso
 test-results/unit-bin/bounded-console
 bash tests/console_capture.sh
 python3 tests/install_checks.py
+python3 tests/qa_registry_checks.py

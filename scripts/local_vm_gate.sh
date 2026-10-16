@@ -9,7 +9,17 @@ lock="${TMPDIR:-/tmp}/HoneyObs-real-mac-qa.lock"
 if ! mkdir "$lock" 2>/dev/null; then
   echo "別の実Mac検証が進行中か、以前のロックが残っています: $lock" >&2; exit 1
 fi
-trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
+cleanup() {
+  local qa_exit_status=$?
+  trap - EXIT
+  if ! python3 tests/qa_registry.py "$PWD/build/HoneyObs.app"; then
+    if [[ "$qa_exit_status" == 0 ]]; then qa_exit_status=1; fi
+  fi
+  rm -f "$lock/pid"
+  rmdir "$lock"
+  exit "$qa_exit_status"
+}
+trap cleanup EXIT
 printf '%s\n' "$$" > "$lock/pid"
 bash scripts/build.sh
 python3 scripts/check_bundle.py

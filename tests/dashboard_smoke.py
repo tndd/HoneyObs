@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 from integration import APP, ROOT, read, wait, alive, curl, xpc_helpers, bootout_owned
+from qa_registry import register_app
 
 
 def main():
@@ -11,6 +12,7 @@ def main():
     directory.mkdir(mode=0o700, parents=True)
     report = {}
     with (directory / 'app.log').open('w') as log:
+        register_app(APP.parents[2])
         process = subprocess.Popen([str(APP), '--test-mode', '--ui-dashboard-smoke', '--run-directory', str(directory)], stdout=log, stderr=subprocess.STDOUT)
         def ui():
             return read(directory / 'ui-state.json')

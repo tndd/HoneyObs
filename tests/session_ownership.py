@@ -12,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+from qa_registry import register_app
 
 options_parser = argparse.ArgumentParser()
 options_parser.add_argument('--egress-fixture', action='store_true', help='EGRESS_TESTING専用appの固定loopback fixtureで通信VMも検証する')
@@ -136,6 +137,7 @@ for fault in faults:
     held = None
     launch = [str(EXE), '--test-mode', '--headless', '--run-directory', str(run)]
     launch += ['--public', '--test-egress-fixture'] if OPTIONS.egress_fixture else ['--local-origin']
+    register_app(APP)
     wrapper = subprocess.Popen(launch,
                                stdout=(run / 'launcher.log').open('w'), stderr=subprocess.STDOUT)
     owner = {}; witness = []; timeline = {}; resource_elapsed = None; start = None

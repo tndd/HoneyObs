@@ -10,6 +10,7 @@ import socket
 import subprocess
 import time
 import uuid
+from qa_registry import register_app
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / 'build/HoneyObs.app/Contents/MacOS/HoneyObs'
@@ -84,6 +85,7 @@ class Session:
         if local_origin:
             command.append("--local-origin")
         self.vz_helpers = []
+        register_app(APP.parents[2])
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT, env=env)
 
     def state(self):
