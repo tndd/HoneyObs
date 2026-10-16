@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -42,7 +43,10 @@ func (c vmConn) SetDeadline(t time.Time) error {
 	return c.SetWriteDeadline(t)
 }
 
-type vmListener struct{ fd int }
+type vmListener struct {
+	fd        int
+	closeOnce sync.Once
+}
 
 func (l *vmListener) Accept() (net.Conn, error) {
 	// Goのsyscall.AcceptはAF_VSOCKを変換できないため、アドレスなしでaccept4する。
@@ -52,7 +56,16 @@ func (l *vmListener) Accept() (net.Conn, error) {
 	}
 	return vmConn{os.NewFile(n, "vsock")}, nil
 }
-func (l *vmListener) Close() error   { return syscall.Close(l.fd) }
+func (l *vmListener) Close() error {
+	var err error
+	l.closeOnce.Do(func() {
+		// raw accept4はGo netpollのlistenerではない。close単独ではLinuxの
+		// ブロッキングacceptが起きずShutdownが終わらないため、先にshutdownする。
+		_ = syscall.Shutdown(l.fd, syscall.SHUT_RDWR)
+		err = syscall.Close(l.fd)
+	})
+	return err
+}
 func (l *vmListener) Addr() net.Addr { return vmAddr{} }
 func listenVM(port uint32) (*vmListener, error) {
 	fd, e := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)

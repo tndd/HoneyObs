@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dashboardSmoke: Bool { options.dashboardSmoke }
     private var smokeStage = 0
     private var terminationPending = false
+    private var lastTestAction = ""
 
     init(engine: Engine, options: LaunchOptions) {
         self.options = options
@@ -80,14 +81,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             var state = engine.testingSnapshot
             state.merge(["pid":getpid(),"windowMiniaturized":window?.isMiniaturized ?? false,
-                         "appHidden":NSApp.isHidden,"windowVisible":window?.isVisible ?? false]) { _,new in new }
+                         "appHidden":NSApp.isHidden,"windowVisible":window?.isVisible ?? false,
+                         "appActive":NSApp.isActive,"activationPolicy":NSApp.activationPolicy().rawValue,
+                         "windowKey":window?.isKeyWindow ?? false,"windowNumber":window?.windowNumber ?? 0,
+                         "windowStyle":window?.styleMask.rawValue ?? 0,
+                         "minimizeEnabled":window?.standardWindowButton(.miniaturizeButton)?.isEnabled ?? false,
+                         "lastAction":lastTestAction]) { _,new in new }
             engine.save(state,name:"background-state.json")
             let command = engine.directory.appendingPathComponent("ui-command")
             if let value = try? String(contentsOf: command, encoding: .utf8) {
                 try? FileManager.default.removeItem(at: command)
+                lastTestAction = value.trimmingCharacters(in:.whitespacesAndNewlines)
                 switch value.trimmingCharacters(in: .whitespacesAndNewlines) {
                 case "local-origin": engine.start(publish:false,localExercise:true)
-                case "minimize": window?.miniaturize(nil)
+                case "minimize": window?.performMiniaturize(nil)
                 case "restore": window?.deminiaturize(nil)
                 case "hide": NSApp.hide(nil)
                 case "show": NSApp.unhide(nil); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
