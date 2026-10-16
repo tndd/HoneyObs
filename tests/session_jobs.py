@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import plistlib
 import signal
 import subprocess
 import time
@@ -16,6 +17,15 @@ EXE = APP / 'Contents/MacOS/HoneyObs'
 HELPER = APP / 'Contents/Helpers/HoneyObsSession'
 EXE.parent.mkdir(parents=True)
 HELPER.parent.mkdir(parents=True)
+(APP / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+    'CFBundleIdentifier': 'local.honeyobs.session-jobs-fixture',
+    'CFBundleName': 'HoneyObs Session Fixture',
+    'CFBundleExecutable': 'HoneyObs',
+    'CFBundlePackageType': 'APPL',
+    'CFBundleInfoDictionaryVersion': '6.0',
+    'CFBundleVersion': '1',
+    'CFBundleShortVersionString': '1.0',
+}))
 REPORT = {'scope': '実launchd・製品socket認証とlease、GUI/VMなし', 'cases': {}}
 
 
@@ -54,6 +64,7 @@ for sources, target in [(['Sources/HoneyObs/SessionOwnership.swift', 'tests/Sess
                         (['Sources/HoneyObs/SessionOwnership.swift', 'Sources/SessionMonitor/Main.swift'], HELPER)]:
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', *sources, '-o', str(target)], cwd=ROOT, check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True, capture_output=True)
+subprocess.run(['codesign', '--force', '--sign', '-', str(APP)], check=True, capture_output=True)
 
 for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke', 'finish-delayed-ack', 'finish-no-ack']:
     run = OUT / fault
