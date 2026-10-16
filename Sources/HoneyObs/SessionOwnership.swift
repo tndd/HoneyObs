@@ -38,9 +38,8 @@ private enum SessionSocket {
     }
 }
 
-/// The VZ-owning GUI is the actual launchd job body. A separate CLI monitor
-/// requests bootout on a terminal lease failure; ExitTimeOut hard-kills the VZ
-/// owner itself, so recovery does not depend on cooperative child-group cleanup.
+// GUIと監視役は別々の一時launchdジョブ本体。相手の本体消滅を確認してから自分を回収する。
+// 同一ユーザーがこのアプリや0700の記録を書き換えた場合は信頼境界の外とする。
 enum SessionOwnership {
     static func birth(_ pid: pid_t) -> String? {
         var info = proc_bsdinfo()
@@ -48,8 +47,7 @@ enum SessionOwnership {
         return "\(info.pbi_start_tvsec):\(info.pbi_start_tvusec)"
     }
     static func control(_ arguments: [String]) -> (Int32, String) {
-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/launchctl"); process.arguments = arguments
         let output = Pipe(); process.standardOutput = output; process.standardError = output
         do {
             try process.run()
@@ -57,200 +55,280 @@ enum SessionOwnership {
             return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         } catch { return (-1, error.localizedDescription) }
     }
-    private static func object(_ url: URL) -> [String: Any] {
+    static func object(_ url: URL) -> [String: Any] {
         (try? Data(contentsOf: url)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
     }
-    private static func valid(_ service: String) -> Bool {
-        let prefix = "gui/\(getuid())/local.honeyobs.session."
-        return service.hasPrefix(prefix) && UUID(uuidString: String(service.dropFirst(prefix.count))) != nil
+    static func save(_ value: [String: Any], _ url: URL) throws {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: url, options: .atomic)
     }
-    private static func waitForDeath(_ service: String, pid: pid_t?, identity: String?, seconds: Double = 3) -> Bool {
+    static func valid(_ service: String) -> Bool {
+        for kind in ["session", "monitor"] {
+            let prefix = "gui/\(getuid())/local.honeyobs.\(kind)."
+            if service.hasPrefix(prefix), UUID(uuidString: String(service.dropFirst(prefix.count))) != nil { return true }
+        }
+        return false
+    }
+    static func jobPID(_ service: String) -> pid_t? {
+        let result = control(["print", service]); guard result.0 == 0 else { return nil }
+        for line in result.1.split(separator: "\n") {
+            let parts = line.trimmingCharacters(in: .whitespaces).split(separator: " ")
+            if parts.count == 3, parts[0] == "pid", parts[1] == "=", let pid = pid_t(parts[2]), pid > 1 { return pid }
+        }
+        return nil
+    }
+    static func waitForDeath(_ service: String, pid: pid_t?, identity: String?, seconds: Double = 4) -> Bool {
+        // PID未取得を死亡確認へ変換しない。job不在と本体identity消滅を別々に確認する。
+        guard let pid, let identity, !identity.isEmpty else { return false }
         let end = safetyTime() + seconds
         repeat {
-            let dead = pid == nil || identity == nil || birth(pid!) != identity
-            if dead, control(["print", service]).0 != 0 { return true }
+            if birth(pid) != identity, control(["print", service]).0 != 0 { return true }
             usleep(50_000)
         } while safetyTime() < end
         return false
     }
-
-    /// The original Launch Services app exits after the real UI and monitor
-    /// have authenticated. The standalone helper has no NSApplication identity.
-    static func handoff(_ arguments: [String]) -> Int32 {
-        let helper = URL(fileURLWithPath: arguments[0]).deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Helpers/HoneyObsSession")
-        let process = Process(); process.executableURL = helper; process.arguments = arguments
-        let readiness = Pipe(); process.standardOutput = readiness; process.standardError = FileHandle.standardError
-        do {
-            try process.run()
-            let fd = readiness.fileHandleForReading.fileDescriptor
-            SessionSocket.nonblocking(fd)
-            var data = Data(); let end = safetyTime() + 12
-            while process.isRunning, safetyTime() < end {
-                if !SessionSocket.drain(fd, into: &data) { break }
-                if data.count >= 6 { return data == Data("READY\n".utf8) ? 0 : 1 }
-                usleep(20_000)
-            }
-            if process.isRunning { process.terminate() }
-            return 1
-        } catch { fputs("セッション監視役を開始できません: \(error)\n", stderr); return 1 }
+    static func registry(_ arguments: [String], directory: URL) -> URL {
+        arguments.contains("--test-mode") ? directory.deletingLastPathComponent().appendingPathComponent(".session-registry") :
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("HoneyObs/OSSession")
     }
-
-    static func launch(_ arguments: [String], directory: URL, announceReady: Bool = false) -> Int32 {
-        let files = FileManager.default
-        var service = "", client: pid_t?, clientBirth: String?
-        var registered = false, terminalReason = "startup-failure", socketDirectory: URL?
-        var registryRecord: URL?
-        defer {
-            if registered { _ = control(["bootout", service]) }
-            if let socketDirectory { try? files.removeItem(at: socketDirectory) }
-        }
+    static func removeSocketDirectory(_ directory: URL) {
+        guard directory.deletingLastPathComponent().path == "/private/tmp", directory.lastPathComponent.hasPrefix("HoneyObs-"),
+              UUID(uuidString: String(directory.lastPathComponent.dropFirst("HoneyObs-".count))) != nil else { return }
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFDIR,
+              info.st_mode & 0o777 == 0o700 else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+    static func removeRegistry(_ record: URL, monitor: String) {
+        if object(record)["ownerService"] as? String == monitor { try? FileManager.default.removeItem(at: record) }
+    }
+    static func bootoutSelf(_ service: String, status: Int32) -> Never {
+        _ = control(["bootout", service]); exit(status)
+    }
+    static func handoff(_ arguments: [String], directory: URL) -> Int32 { launch(arguments, directory: directory) }
+    static func launch(_ arguments: [String], directory: URL) -> Int32 {
+        let files = FileManager.default, testing = arguments.contains("--test-mode")
+        let sessionID = UUID().uuidString.lowercased(), token = UUID().uuidString
+        let ownerService = "gui/\(getuid())/local.honeyobs.monitor." + sessionID
+        let clientService = "gui/\(getuid())/local.honeyobs.session." + sessionID
+        let temporary = URL(fileURLWithPath: "/private/tmp/HoneyObs-" + UUID().uuidString)
+        var ownerPID: pid_t?, ownerBirth: String?, ready = false
         do {
             try files.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let testing = arguments.contains("--test-mode")
-            let registry = testing ? directory.deletingLastPathComponent().appendingPathComponent(".session-registry") :
-                files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("HoneyObs/OSSession")
-            try files.createDirectory(at: registry, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let lockFD = open(registry.appendingPathComponent("ownership.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+            try files.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let helper = URL(fileURLWithPath: arguments[0]).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Helpers/HoneyObsSession")
+            guard let launcherBirth = birth(getpid()), files.isExecutableFile(atPath: helper.path) else { throw POSIXError(.ENOENT) }
+            let program = [helper.path, "--monitor-job", ownerService, clientService, directory.path, temporary.path, token,
+                           String(getpid()), launcherBirth] + arguments
+            var plist = job(label: String(ownerService.split(separator: "/").last!), arguments: program, directory: directory, log: "owner.log")
+            if testing, let probes = ProcessInfo.processInfo.environment["HONEYOBS_PROBE_TARGETS"] { plist["EnvironmentVariables"] = ["HONEYOBS_PROBE_TARGETS": probes] }
+            let plistURL = directory.appendingPathComponent("monitor-job.plist")
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: plistURL, options: .atomic)
+            try save(["ownerService": ownerService, "clientService": clientService, "socketDirectory": temporary.path], directory.appendingPathComponent("bootstrap.json"))
+            try save(["token": token, "expires": safetyTime() + 2], temporary.appendingPathComponent("launcher-lease.json"))
+            guard control(["bootstrap", "gui/\(getuid())", plistURL.path]).0 == 0 else { throw POSIXError(.EIO) }
+            signal(SIGTERM) { _ in sessionStop = 1 }; signal(SIGINT) { _ in sessionStop = 1 }
+            let end = safetyTime() + 15
+            while safetyTime() < end, sessionStop == 0 {
+                if ownerPID == nil, let pid = jobPID(ownerService), let identity = birth(pid) { ownerPID = pid; ownerBirth = identity }
+                let value = object(directory.appendingPathComponent("ui-ready.json"))
+                if value["token"] as? String == token, let pid = value["clientPID"] as? Int32, let identity = value["clientBirth"] as? String {
+                    if jobPID(clientService) == pid, birth(pid) == identity, ownerPID != nil, birth(ownerPID!) == ownerBirth { ready = true; break }
+                    // 起動直後の通常終了も、既に書いた認証済みreadyと回収receiptで確認する。
+                    if object(directory.appendingPathComponent("session-result.json"))["status"] as? Int32 == 0,
+                       birth(pid) != identity, control(["print", clientService]).0 != 0, control(["print", ownerService]).0 != 0 { return 0 }
+                }
+                try save(["token": token, "expires": safetyTime() + 2], temporary.appendingPathComponent("launcher-lease.json"))
+                if ownerPID != nil, birth(ownerPID!) != ownerBirth { break }
+                usleep(50_000)
+            }
+            guard ready else { throw POSIXError(.ETIMEDOUT) }
+            try save(["ready": true], directory.appendingPathComponent("launcher-ready.json"))
+            if !testing { return 0 }
+            // CLI検証だけのobserver。製品の安全な所有はこのwrapperの寿命に依存しない。
+            var stopping = false, stopAt = 0.0
+            while birth(ownerPID!) == ownerBirth {
+                if sessionStop != 0, !stopping { stopping = true; stopAt = safetyTime(); _ = control(["kill", "SIGTERM", clientService]) }
+                if stopping, safetyTime() - stopAt > 10 { throw POSIXError(.ETIMEDOUT) }
+                usleep(50_000)
+            }
+            let receipt = object(directory.appendingPathComponent("session-result.json"))
+            return receipt["status"] as? Int32 ?? 1
+        } catch {
+            let clientRecord = object(directory.appendingPathComponent("owner.json"))
+            let clientPID = (clientRecord["clientPID"] as? Int32) ?? jobPID(clientService)
+            let clientBirth = (clientRecord["clientBirth"] as? String) ?? clientPID.flatMap(birth)
+            _ = control(["bootout", clientService]); _ = control(["bootout", ownerService])
+            let clientGone = waitForDeath(clientService, pid: clientPID, identity: clientBirth)
+            let ownerGone = waitForDeath(ownerService, pid: ownerPID, identity: ownerBirth)
+            if clientGone && ownerGone { removeSocketDirectory(temporary) }
+            fputs("セッション起動・回収失敗（回収確認: \(clientGone && ownerGone)）: \(error)\n", stderr)
+            return 1
+        }
+    }
+    private static func job(label: String, arguments: [String], directory: URL, log: String) -> [String: Any] {
+        let output = arguments.contains("--test-mode") ? directory.appendingPathComponent(log).path : "/dev/null"
+        return ["Label": label, "ProgramArguments": arguments, "RunAtLoad": true, "KeepAlive": false, "ExitTimeOut": 1,
+         "AbandonProcessGroup": false, "ProcessType": "Interactive", "Umask": 0o077, "WorkingDirectory": directory.path,
+         "StandardOutPath": output, "StandardErrorPath": output]
+    }
+    static func monitor(_ arguments: [String]) -> Never {
+        guard arguments.count > 9, arguments[1] == "--monitor-job", getppid() == 1, getpgrp() == getpid(),
+              valid(arguments[2]), valid(arguments[3]), let launcher = pid_t(arguments[7]) else { exit(2) }
+        let ownerService = arguments[2], clientService = arguments[3], directory = URL(fileURLWithPath: arguments[4])
+        let temporary = URL(fileURLWithPath: arguments[5]), token = arguments[6], launcherBirth = arguments[8]
+        let original = Array(arguments.dropFirst(9)), record = registry(original, directory: directory).appendingPathComponent("active-session.json")
+        var client: pid_t?, clientBirth: String?, reason = "startup-failure", status: Int32 = 1, cleanExit = false, attemptedClientBootstrap = false
+        do {
+            let files = FileManager.default
+            try files.createDirectory(at: record.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let lockFD = open(record.deletingLastPathComponent().appendingPathComponent("ownership.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
             guard lockFD >= 0 else { throw POSIXError(.EACCES) }
             defer { close(lockFD) }
             guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { throw POSIXError(.EBUSY) }
-            let record = registry.appendingPathComponent("active-session.json"); registryRecord = record
             let previous = object(record)
-            if let oldService = previous["service"] as? String {
-                guard valid(oldService), let oldDirectory = previous["directory"] as? String else { throw POSIXError(.EINVAL) }
+            guard previous.isEmpty || (previous["ownerService"] is String && previous["clientService"] is String) else { throw POSIXError(.EINVAL) }
+            if let oldOwner = previous["ownerService"] as? String, let oldClient = previous["clientService"] as? String {
+                guard valid(oldOwner), valid(oldClient), let oldDirectory = previous["directory"] as? String else { throw POSIXError(.EINVAL) }
                 let old = object(URL(fileURLWithPath: oldDirectory).appendingPathComponent("owner.json"))
-                let oldPID = ((previous["clientPID"] ?? old["clientPID"]) as? NSNumber)?.int32Value
-                let oldBirth = (previous["clientBirth"] ?? old["clientBirth"]) as? String
-                if control(["print", oldService]).0 == 0 { _ = control(["bootout", oldService]) }
-                guard waitForDeath(oldService, pid: oldPID, identity: oldBirth) else {
-                    throw NSError(domain: "前のOSセッションを回収できません。再開しません", code: 1)
-                }
+                let oldOwnerPID = old["ownerPID"] as? Int32, oldClientPID = old["clientPID"] as? Int32
+                let oldOwnerBirth = old["ownerBirth"] as? String, oldClientBirth = old["clientBirth"] as? String
+                _ = control(["bootout", oldClient]); _ = control(["bootout", oldOwner])
+                guard waitForDeath(oldClient, pid: oldClientPID, identity: oldClientBirth),
+                      waitForDeath(oldOwner, pid: oldOwnerPID, identity: oldOwnerBirth) else { throw POSIXError(.EBUSY) }
+                if let path = previous["socketDirectory"] as? String { removeSocketDirectory(URL(fileURLWithPath: path)) }
                 try files.removeItem(at: record)
             }
-            let label = "local.honeyobs.session." + UUID().uuidString.lowercased()
-            service = "gui/\(getuid())/" + label
-            guard let launcherBirth = birth(getpid()) else { throw POSIXError(.ESRCH) }
-            let temporary = URL(fileURLWithPath: "/private/tmp/HoneyObs-" + UUID().uuidString)
-            try files.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]); socketDirectory = temporary
-            let path = temporary.appendingPathComponent("lease.sock").path, token = UUID().uuidString
+            let path = temporary.appendingPathComponent("lease.sock").path
             let listener = try SessionSocket.open(); defer { close(listener) }
             var address = try SessionSocket.address(path)
             let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
             guard bound == 0, listen(listener, 1) == 0 else { throw POSIXError(.EIO) }
             SessionSocket.nonblocking(listener)
-            var jobArguments = [arguments[0], "--session-client", label, path, token, String(getpid()), launcherBirth] + Array(arguments.dropFirst())
-            if !jobArguments.contains("--run-directory") { jobArguments += ["--run-directory", directory.path] }
-            var plist: [String: Any] = ["Label": label, "ProgramArguments": jobArguments,
-                "RunAtLoad": true, "KeepAlive": false, "AbandonProcessGroup": false, "ExitTimeOut": 1,
-                "ProcessType": "Interactive", "Umask": 0o077, "WorkingDirectory": directory.path,
-                "StandardOutPath": directory.appendingPathComponent("client.log").path,
-                "StandardErrorPath": directory.appendingPathComponent("client.log").path]
-            if testing, let probes = ProcessInfo.processInfo.environment["HONEYOBS_PROBE_TARGETS"] { plist["EnvironmentVariables"] = ["HONEYOBS_PROBE_TARGETS": probes] }
+            guard let identity = birth(getpid()) else { throw POSIXError(.ESRCH) }
+            try save(["ownerService": ownerService, "clientService": clientService, "directory": directory.path,
+                      "socketDirectory": temporary.path], record)
+            var clientArguments = [original[0], "--session-client", clientService, ownerService, path, token, String(getpid()), identity] + Array(original.dropFirst())
+            if !clientArguments.contains("--run-directory") { clientArguments += ["--run-directory", directory.path] }
+            var plist = job(label: String(clientService.split(separator: "/").last!), arguments: clientArguments, directory: directory, log: "client.log")
+            if original.contains("--test-mode"), let probes = ProcessInfo.processInfo.environment["HONEYOBS_PROBE_TARGETS"] { plist["EnvironmentVariables"] = ["HONEYOBS_PROBE_TARGETS": probes] }
             let plistURL = directory.appendingPathComponent("session-job.plist")
             try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: plistURL, options: .atomic)
-            let ownership: [String: Any] = ["service": service, "directory": directory.path, "launcherPID": getpid()]
-            let encoded = try JSONSerialization.data(withJSONObject: ownership)
-            try encoded.write(to: record, options: .atomic); try encoded.write(to: directory.appendingPathComponent("os-session.json"), options: .atomic)
+            try save(object(record), directory.appendingPathComponent("os-session.json"))
+            attemptedClientBootstrap = true
             guard control(["bootstrap", "gui/\(getuid())", plistURL.path]).0 == 0 else { throw POSIXError(.EIO) }
-            registered = true
-            signal(SIGTERM) { _ in sessionStop = 1 }; signal(SIGINT) { _ in sessionStop = 1 }; signal(SIGPIPE, SIG_IGN)
-            var fd: Int32 = -1, pending = Data(), nextCheck = 0.0
-            let startupEnd = safetyTime() + 10
-            while fd < 0, safetyTime() < startupEnd, sessionStop == 0 {
+            signal(SIGTERM) { _ in sessionStop = 1 }; signal(SIGINT) { _ in sessionStop = 1 }
+            var fd: Int32 = -1
+            let startup = safetyTime() + 10
+            while fd < 0, safetyTime() < startup, sessionStop == 0 {
+                guard birth(launcher) == launcherBirth else { throw POSIXError(.ESRCH) }
+                if client == nil, let pid = jobPID(clientService), let birth = birth(pid) { client = pid; clientBirth = birth }
                 fd = accept(listener, nil, nil)
-                if fd < 0 { usleep(20_000); continue }
-                guard let peer = SessionSocket.peer(fd), let identity = birth(peer) else { close(fd); throw POSIXError(.EPERM) }
-                let job = control(["print", service])
-                guard job.0 == 0, job.1.range(of: "(?m)^\\s*pid = \(peer)$", options: .regularExpression) != nil,
-                      birth(peer) == identity else { close(fd); throw POSIXError(.EPERM) }
-                client = peer; clientBirth = identity
-                var authenticatedOwnership = ownership
-                authenticatedOwnership["clientPID"] = peer; authenticatedOwnership["clientBirth"] = identity
-                try JSONSerialization.data(withJSONObject: authenticatedOwnership).write(to: record, options: .atomic)
+                if fd < 0 { usleep(20_000) }
             }
             guard fd >= 0 else { throw POSIXError(.ETIMEDOUT) }
-            defer { close(fd) }; SessionSocket.nonblocking(fd)
-            var sequence: UInt64 = 0, deadline = safetyTime() + 3, handshaken = false, stoppingAt = 0.0
-            while true {
-                if sessionStop != 0, stoppingAt == 0 { stoppingAt = safetyTime(); _ = control(["kill", "SIGTERM", service]) }
-                if stoppingAt > 0, safetyTime() - stoppingAt >= 8 { terminalReason = "stop-timeout"; break }
-                guard safetyTime() < deadline else { terminalReason = "lease-expired"; break }
-                guard SessionSocket.drain(fd, into: &pending) else { terminalReason = "client-eof"; break }
+            defer { close(fd) }; _ = fcntl(fd, F_SETFD, FD_CLOEXEC); SessionSocket.nonblocking(fd)
+            guard let peer = SessionSocket.peer(fd), jobPID(clientService) == peer, let peerBirth = birth(peer) else { throw POSIXError(.EPERM) }
+            client = peer; clientBirth = peerBirth
+            var pending = Data(), sequence: UInt64 = 0, deadline = safetyTime() + 3, handshaken = false, uiReady = false
+            monitorLoop: while true {
+                if sessionStop != 0 { reason = "monitor-termination"; break }
+                if !uiReady {
+                    let lease = object(temporary.appendingPathComponent("launcher-lease.json"))
+                    guard birth(launcher) == launcherBirth, lease["token"] as? String == token,
+                          let expires = lease["expires"] as? Double, expires > safetyTime(), expires <= safetyTime() + 2.1 else { reason = "launcher-startup-expired"; break }
+                }
+                guard safetyTime() < deadline, SessionSocket.drain(fd, into: &pending) else { reason = "client-lease-ended"; break }
                 if !handshaken, pending.count >= token.utf8.count {
-                    guard pending.prefix(token.utf8.count) == Data(token.utf8) else { terminalReason = "invalid-token"; break }
+                    guard pending.prefix(token.utf8.count) == Data(token.utf8) else { reason = "invalid-token"; break }
                     pending.removeFirst(token.utf8.count); handshaken = true
-                    if announceReady { try FileHandle.standardOutput.write(contentsOf: Data("READY\n".utf8)) }
                 }
                 var invalid = false
                 while handshaken, pending.count >= 16 {
                     let frame = Data(pending.prefix(16)); pending.removeFirst(16)
                     let next = frame.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
                     let expiry = frame.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self) }
+                    if next == 0 && expiry == 1 {
+                        guard uiReady else { invalid = true; break }
+                        cleanExit = true; reason = "client-normal-exit"; break monitorLoop
+                    }
+                    if next == 0 && expiry == 0 {
+                        guard !uiReady else { invalid = true; break }; uiReady = true
+                        let receipt: [String: Any] = ["token": token, "clientPID": peer, "clientBirth": peerBirth]
+                        try save(receipt, temporary.appendingPathComponent("ready.json"))
+                        try save(receipt, directory.appendingPathComponent("ui-ready.json")); continue
+                    }
                     let now = safetyTime(), expires = Double(expiry) / 1_000_000_000
                     guard next > sequence, expires > now, expires <= now + 3.01 else { invalid = true; break }
                     sequence = next; deadline = expires
                     if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { invalid = true; break }
                 }
-                if invalid { terminalReason = "invalid-lease"; break }
-                if safetyTime() >= nextCheck {
-                    nextCheck = safetyTime() + 1
-                    if birth(client!) != clientBirth { terminalReason = "client-death"; break }
-                }
+                if invalid { reason = "invalid-lease"; break }
                 usleep(20_000)
             }
-            _ = control(["bootout", service])
-            guard waitForDeath(service, pid: client, identity: clientBirth) else { throw POSIXError(.ETIMEDOUT) }
-            registered = false
-            let state = object(directory.appendingPathComponent("state.json"))
-            let status: Int32 = (state["shutdownComplete"] as? Bool == true) ? 0 : 1
-            try JSONSerialization.data(withJSONObject: ["reason": terminalReason, "status": status, "osOwnerGone": true])
-                .write(to: directory.appendingPathComponent("session-result.json"), options: .atomic)
-            try files.removeItem(at: record)
-            return status
-        } catch {
-            if registered {
-                _ = control(["bootout", service])
-                if waitForDeath(service, pid: client, identity: clientBirth) { registered = false; if let registryRecord { try? files.removeItem(at: registryRecord) } }
-            }
-            fputs("OSセッション失敗: \(error.localizedDescription)\n", stderr)
-            return 1
+        } catch { fputs("OS監視失敗: \(error)\n", stderr) }
+        if client == nil, let pid = jobPID(clientService), let identity = birth(pid) { client = pid; clientBirth = identity }
+        _ = control(["bootout", clientService])
+        let gone = !attemptedClientBootstrap || waitForDeath(clientService, pid: client, identity: clientBirth)
+        if gone {
+            status = cleanExit && object(directory.appendingPathComponent("state.json"))["shutdownComplete"] as? Bool == true ? 0 : 1
+            removeRegistry(record, monitor: ownerService); removeSocketDirectory(temporary)
         }
+        try? save(["reason": reason, "status": status, "osOwnerGone": gone], directory.appendingPathComponent("session-result.json"))
+        bootoutSelf(ownerService, status: status)
     }
 }
 
 final class SessionClient {
     var requiresRecovery: () -> Bool = { false }
-    private let service: String, fd: Int32
-    private var timer: Timer?
-    private var sequence: UInt64 = 0, acknowledged: UInt64 = 0
-    private var issued: [UInt64: UInt64] = [:]
-    private var pending = Data(), deadline = safetyTime() + 3
-    private var revoked = false
+    var onRevoke: () -> Void = {}
+    private let service: String, monitorService: String, fd: Int32, monitorPID: pid_t, monitorBirth: String
+    private let temporary: URL, record: URL, directory: URL
+    private var timer: Timer?, sequence: UInt64 = 0, acknowledged: UInt64 = 0
+    private var issued: [UInt64: UInt64] = [:], pending = Data(), deadline = safetyTime() + 3
+    private var revoked = false, ready = false
     init(arguments: [String], directory: URL) throws {
-        guard let owned = arguments.firstIndex(of: "--session-client"), owned + 5 < arguments.count,
-              getppid() == 1, getpgrp() == getpid(), let launcher = pid_t(arguments[owned + 4]) else { throw POSIXError(.EPERM) }
-        let label = arguments[owned + 1], path = arguments[owned + 2], token = arguments[owned + 3], identity = arguments[owned + 5]
-        service = "gui/\(getuid())/" + label
-        let socket = try SessionSocket.open()
-        var address = try SessionSocket.address(path)
+        guard let index = arguments.firstIndex(of: "--session-client"), index + 6 < arguments.count,
+              getppid() == 1, getpgrp() == getpid(), let launcher = pid_t(arguments[index + 5]) else { throw POSIXError(.EPERM) }
+        service = arguments[index + 1]; monitorService = arguments[index + 2]
+        guard SessionOwnership.valid(service), SessionOwnership.valid(monitorService) else { throw POSIXError(.EPERM) }
+        let path = arguments[index + 3], token = arguments[index + 4]
+        monitorPID = launcher; monitorBirth = arguments[index + 6]; self.directory = directory
+        temporary = URL(fileURLWithPath: path).deletingLastPathComponent()
+        record = SessionOwnership.registry(arguments, directory: directory).appendingPathComponent("active-session.json")
+        let socket = try SessionSocket.open(); var address = try SessionSocket.address(path)
         let connected = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(socket, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
-        guard connected == 0, SessionSocket.peer(socket) == launcher, SessionOwnership.birth(launcher) == identity else { close(socket); throw POSIXError(.EPERM) }
+        guard connected == 0, SessionSocket.peer(socket) == launcher, SessionOwnership.birth(launcher) == monitorBirth,
+              SessionOwnership.jobPID(monitorService) == launcher, SessionOwnership.jobPID(service) == getpid() else { close(socket); throw POSIXError(.EPERM) }
         fd = socket
         let nonce = Data(token.utf8)
         guard nonce.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) == nonce.count else { close(fd); throw POSIXError(.EPIPE) }
         SessionSocket.nonblocking(fd)
-        if let data = try? JSONSerialization.data(withJSONObject: ["label": label, "ownerPID": launcher, "ownerPGID": getpgid(launcher),
-            "clientPID": getpid(), "clientPGID": getpgrp(), "clientBirth": SessionOwnership.birth(getpid()) ?? "", "jobBodyIsVZOwner": true]) {
-            try? data.write(to: directory.appendingPathComponent("owner.json"), options: .atomic)
-        }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
-        tick()
+        try SessionOwnership.save(["label": String(service.split(separator: "/").last!), "ownerService": monitorService, "clientService": service,
+            "ownerPID": launcher, "ownerBirth": monitorBirth, "clientPID": getpid(), "clientBirth": SessionOwnership.birth(getpid()) ?? "",
+            "ownerPGID": getpgid(launcher), "clientPGID": getpgrp(), "jobBodyIsVZOwner": true, "socketDirectory": temporary.path], directory.appendingPathComponent("owner.json"))
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }; tick()
     }
     deinit { timer?.invalidate(); close(fd) }
+    func markUIReady() {
+        guard !ready, !revoked else { return }; ready = true
+        let frame = Data(repeating: 0, count: 16)
+        if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { revoke() }
+    }
+    func finish() {
+        guard ready, !revoked else { return }
+        timer?.invalidate(); timer = nil
+        var control: UInt64 = 0, cleanExit: UInt64 = 1
+        var frame = withUnsafeBytes(of: &control) { Data($0) }; frame.append(withUnsafeBytes(of: &cleanExit) { Data($0) })
+        _ = frame.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+    }
     private func revoke() {
         guard !revoked else { return }; revoked = true; timer?.invalidate(); timer = nil
-        _ = SessionOwnership.control(["bootout", service])
+        onRevoke()
+        _ = SessionOwnership.control(["bootout", monitorService])
+        let gone = SessionOwnership.waitForDeath(monitorService, pid: monitorPID, identity: monitorBirth)
+        if gone { SessionOwnership.removeRegistry(record, monitor: monitorService); SessionOwnership.removeSocketDirectory(temporary) }
+        try? SessionOwnership.save(["reason": "monitor-lease-ended", "status": 1, "monitorGone": gone], directory.appendingPathComponent("session-result.json"))
+        SessionOwnership.bootoutSelf(service, status: 1)
     }
     private func tick() {
         guard !revoked else { return }
@@ -263,10 +341,8 @@ final class SessionClient {
             guard next > acknowledged, issued[next] == expiry, expires > now, expires <= now + 3.01 else { revoke(); return }
             acknowledged = next; deadline = expires; issued = issued.filter { $0.key > next }
         }
-        guard issued.count < 32 else { revoke(); return }
-        sequence += 1
-        var next = sequence, expiry = UInt64((safetyTime() + 3) * 1_000_000_000)
-        issued[next] = expiry
+        guard issued.count < 32 else { revoke(); return }; sequence += 1
+        var next = sequence, expiry = UInt64((safetyTime() + 3) * 1_000_000_000); issued[next] = expiry
         var frame = withUnsafeBytes(of: &next) { Data($0) }; frame.append(withUnsafeBytes(of: &expiry) { Data($0) })
         if frame.withUnsafeBytes({ Darwin.write(fd, $0.baseAddress, $0.count) }) != 16 { revoke() }
     }

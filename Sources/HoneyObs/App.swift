@@ -60,6 +60,7 @@ func watchdog(_ args: [String]) {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var onReady: (() -> Void)?
     let engine: Engine
     let headless: Bool
     private var window: NSWindow?
@@ -88,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { NSApp.terminate(nil) }
             source.resume(); sources.append(source)
         }
-        if headless { engine.start(publish: CommandLine.arguments.contains("--public"), localExercise: options.testing && CommandLine.arguments.contains("--local-origin")) }
+        if headless { engine.start(publish: CommandLine.arguments.contains("--public"), localExercise: options.testing && CommandLine.arguments.contains("--local-origin")); onReady?() }
         else { createWindow() }
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
@@ -115,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dashboard.onExerciseStop = { [weak exercise] in exercise?.cancel() }
         dashboard.onReady = { [weak self] in
             guard let self else { return }
+            self.onReady?()
             if self.uiSmoke { self.dashboard?.testAction("local") }
             if self.uiPublicSmoke { self.dashboard?.testAction("public") }
             if options.exerciseSmoke { self.dashboard?.testAction("exercise") }
@@ -194,16 +196,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let options = try LaunchOptions(arguments: args)
             if !args.contains("--session-client") {
-                exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args))
+                exit(options.testing ? SessionOwnership.launch(args, directory: options.directory) : SessionOwnership.handoff(args, directory: options.directory))
             }
             let ownership = try SessionClient(arguments: args, directory: options.directory)
             let engine = try Engine(directory: options.directory, resources: Bundle.main.resourceURL!, testing: options.testing, probeTargets: options.probeTargets)
             ownership.requiresRecovery = { engine.requiresSessionRecovery }
+            ownership.onRevoke = { engine.stop(reason: "OS監視の確認期限切れ") }
             let delegate = AppDelegate(engine: engine, options: options)
+            delegate.onReady = { [weak ownership] in ownership?.markUIReady() }
             let application = NSApplication.shared
             application.setActivationPolicy(options.headless ? .prohibited : .regular)
             application.delegate = delegate
-            withExtendedLifetime((delegate, ownership)) { application.run() }
+            withExtendedLifetime((delegate, ownership)) {
+                application.run()
+                if engine.shutdownComplete { ownership.finish() }
+            }
         } catch { fputs("起動失敗: \(error)\n",stderr); exit(1) }
     }
 }
