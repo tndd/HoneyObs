@@ -19,6 +19,9 @@ test-results/unit-bin/launch-options
 swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveChecks.swift \
   -o test-results/unit-bin/session-archive
 test-results/unit-bin/session-archive
+swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveLockChecks.swift \
+  -o test-results/unit-bin/session-archive-lock
+test-results/unit-bin/session-archive-lock
 swiftc -swift-version 5 Sources/HoneyObs/BoundedConsole.swift tests/BoundedConsoleChecks.swift \
   -o test-results/unit-bin/bounded-console
 test-results/unit-bin/bounded-console
