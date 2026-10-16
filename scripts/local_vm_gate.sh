@@ -25,6 +25,7 @@ bash scripts/build.sh
 python3 scripts/check_bundle.py
 python3 tests/session_control.py
 python3 tests/session_jobs.py
+python3 tests/menu_tracking.py
 python3 tests/integration.py --local
 bash tests/lifecycle.sh
 python3 tests/egress_privileges.py
