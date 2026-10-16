@@ -162,3 +162,12 @@ AppKitの終了待ちを初めにterminateLaterで実装したところ、実ア
 ネイティブ操作はWKWebView内のボタン処理を呼ぶ方式で、クリック自体は別途Playwrightで確認しています。アプリ内組み込みブラウザは使用していません。外部トンネル経路は今回の対象外です。ゲストや停止本体に変更がないため、全隔離プローブや停止API故障注入の全体再実行は省略し、この変更に関係する実VM自己ペネとGUI中止を検証しました。全攻撃への耐性や、停止直前にVMに残った未取得記録の回収を保証するものではありません。
 
 最終の画面を残す実演：`test-results/self-pentest-20261015-231357-af7f66/report.json`。同じ全ケースと22回のGUI照合を再確認し、停止済みの結果画面だけを保持します。完了後は進行監視タイマーを停止するため、画面を残しても検証状態の定期書き込みは継続しません。試験Runnerを独立したセッションで起動し、呼び出し元の終了後にも結果を閲覧できるようにしています。
+
+
+## 通常アプリとしての導入と組み込み自己ペネ（2026-10-17、#17）
+
+`~/Applications/HoneyObs.app` に採用アイコンとすべての実行資産を同梱して導入しました。以前の単体Runnerには通常アプリのアイコンと起動導線がありませんでした。製品画面の「自己ペネ」からSwift製の固定localhost試験を起動でき、実行時にPythonやrepoは不要です。Engineのlocalhost専用モードを使い、任意宛先・任意要求を入力する機能はありません。
+
+`bash scripts/build.sh`、`bash scripts/install.sh`、`python3 tests/installed_app.py`、既存の `npm test` と拡張した `node tests/live_dashboard.cjs` が合格しました。導入済みコピーを `/tmp` からLaunch Servicesで起動し、実行パス、repoファイル非参照、バンドル資産利用、アイコン、署名、20ケース・160件全件記録・低速8接続の拒否・第9接続拒否・回復・VMと入口停止を確認しました。製品WKWebViewからの中止、860px表示、完了画像と中止画像の目視確認も実施しました。記録は `test-results/installed-app-20261017-005119/report.json` です。独立した既存試験 `python3 tests/self_pentest.py --gui --close-after` も合格し、`test-results/self-pentest-20261017-005119-77055e/report.json` に保存しました。
+
+今回、公開経路自体と停止APIは変更していないため、外部公開の再試験や停止API故障注入の全体再実行は省略しました。Developer ID署名・公証や一般配布向けインストーラーは含みません。このMac向けのローカル署名です。
