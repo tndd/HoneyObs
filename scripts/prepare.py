@@ -18,8 +18,6 @@ RES = ROOT / 'build/HoneyObs.app/Contents/Resources'
 DEPENDENCIES = [
     ('linux-virt.apk', 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.56-r0.apk',
      'e3839bfd751ff0a4421484f712b9b29efb514024523736a0ef62521521571b12'),
-    ('cloudflared.tgz', 'https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-darwin-arm64.tgz',
-     'a2f79ff7b9420aa537d74af239f376da170bbabeb529aec416002adac6a72e70'),
 ]
 
 
@@ -83,11 +81,8 @@ def main():
                       '\n'.join(Path(n).name.removesuffix('.gz') for n in order).encode()))
         RES.joinpath('initramfs.gz').write_bytes(cpio(files))
         print('VMモジュール:', ', '.join(Path(n).name for n in order))
-    with tarfile.open(CACHE / 'cloudflared.tgz') as archive:
-        member = next(m for m in archive.getmembers() if Path(m.name).name == 'cloudflared' and m.isfile())
-        RES.joinpath('cloudflared').write_bytes(archive.extractfile(member).read())
-        RES.joinpath('cloudflared').chmod(0o755)
-    print('VMとトンネルの同梱準備完了')
+    RES.joinpath('cloudflared').unlink(missing_ok=True)
+    print('おとりVMの同梱準備完了')
 
 
 if __name__ == '__main__':

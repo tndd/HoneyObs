@@ -130,15 +130,38 @@ final class Relay {
     func cancel() { client.cancel(); shutGuest(); queue.async { self.finish() } }
 }
 
+// shutdownとcloseの排他によりFD再利用先への操作を防ぐ。closeはI/O完了後だけ行う。
+final class GuestRead {
+    private let lock = NSLock()
+    private var connection: VZVirtioSocketConnection?
+    private var cancelled = false
+    func attach(_ value: VZVirtioSocketConnection) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancelled else { value.close(); return false }
+        connection = value; return true
+    }
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }; cancelled = true
+        if let connection { _ = shutdown(connection.fileDescriptor,SHUT_RDWR) }
+    }
+    func close() {
+        lock.lock(); defer { lock.unlock() }; connection?.close(); connection = nil
+    }
+}
+
 // VZのAPIはメインキューで呼び、ブロッキングI/Oは別キューへ逃がす。
-func guestRequest(_ machine: VZVirtualMachine, port: UInt32 = 7001, path: String = "/", completion: @escaping (Result<Data, Error>) -> Void) {
+@discardableResult func guestRequest(_ machine: VZVirtualMachine, port: UInt32 = 7001, path: String = "/", completion: @escaping (Result<Data, Error>) -> Void) -> GuestRead {
+    let operation = GuestRead()
     guard let device = machine.socketDevices.first as? VZVirtioSocketDevice else {
-        completion(.failure(NSError(domain: "HoneyObs", code: 1))); return
+        completion(.failure(NSError(domain: "HoneyObs", code: 1))); return operation
     }
     device.connect(toPort: port) { result in
         switch result {
         case .failure(let error): completion(.failure(error))
         case .success(let connection):
+            guard operation.attach(connection) else {
+                completion(.failure(NSError(domain:"HoneyObs",code:4,userInfo:[NSLocalizedDescriptionKey:"観測要求を中止しました"]))); return
+            }
             DispatchQueue.global().async {
                 let fd = connection.fileDescriptor
                 _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
@@ -156,7 +179,7 @@ func guestRequest(_ machine: VZVirtualMachine, port: UInt32 = 7001, path: String
                         if n <= 0 { break }; response.append(contentsOf: buf.prefix(n))
                     }
                 }
-                connection.close()
+                operation.close()
                 let output: Result<Data, Error>
                 if response.count <= 262144, let range = response.range(of: Data("\r\n\r\n".utf8)) {
                     output = .success(response.subdata(in: range.upperBound..<response.count))
@@ -165,4 +188,5 @@ func guestRequest(_ machine: VZVirtualMachine, port: UInt32 = 7001, path: String
             }
         }
     }
+    return operation
 }

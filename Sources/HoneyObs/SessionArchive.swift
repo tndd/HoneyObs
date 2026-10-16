@@ -73,6 +73,15 @@ final class SessionArchive {
         }
     }
     func setClosed(_ closed: Bool) throws { marker.closed = closed; try Self.write(marker,to:directory) }
+    func checkWrite(bytes: Int, name: String) throws {
+        guard !name.contains("/"), bytes >= 0 else { throw Self.failure("保存名が不正です") }
+        var old = stat(); let target = directory.appendingPathComponent(name)
+        let previous = lstat(target.path,&old) == 0 && old.st_mode & S_IFMT == S_IFREG ? old.st_size : 0
+        // atomic書き込みの一時的な二重領域も8MiB内に収める。
+        guard try Self.size(directory) + Int64(bytes) <= 8 * 1024 * 1024 else {
+            throw Self.failure("セッションの保存予算を超えました（既存\(previous)bytes）")
+        }
+    }
     deinit { if fd >= 0 { Darwin.close(fd) } }
     private static func write(_ marker: Marker,to directory:URL) throws {
         try JSONEncoder().encode(marker).write(to:directory.appendingPathComponent(markerName),options:.atomic)

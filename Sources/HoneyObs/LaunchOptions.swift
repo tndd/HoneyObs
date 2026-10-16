@@ -31,8 +31,12 @@ struct LaunchOptions {
             directory = URL(fileURLWithPath: arguments[index + 1], isDirectory: true).standardizedFileURL
             try Self.preparePrivateDirectory(directory)
         } else {
-            directory = defaultDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("HoneyObs/検証/" + UUID().uuidString, isDirectory: true)
+            if let defaultDirectory { directory = defaultDirectory }
+            else {
+                let root = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+                    .appendingPathComponent("HoneyObs/Sessions",isDirectory:true)
+                directory = try SessionArchive.makeDirectory(root:root)
+            }
         }
         headless = testing && arguments.contains("--headless")
         uiSmoke = testing && arguments.contains("--ui-smoke")

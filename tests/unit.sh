@@ -10,7 +10,7 @@ test-results/unit-bin/observations
 swiftc -swift-version 5 -framework Network -framework Virtualization \
   Sources/HoneyObs/Relay.swift tests/PermitChecks.swift -o test-results/unit-bin/permit
 test-results/unit-bin/permit
-swiftc -swift-version 5 Sources/HoneyObs/LaunchOptions.swift tests/LaunchOptionsChecks.swift \
+swiftc -swift-version 5 Sources/HoneyObs/{LaunchOptions,SessionArchive}.swift tests/LaunchOptionsChecks.swift \
   -o test-results/unit-bin/launch-options
 test-results/unit-bin/launch-options
 swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveChecks.swift \

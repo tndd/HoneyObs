@@ -29,10 +29,12 @@ def check(app, distribution=False):
     icon = (resources / 'AppIcon.icns').read_bytes()
     if len(icon) < 10000 or icon[:4] != b'icns' or int.from_bytes(icon[4:8], 'big') != len(icon):
         raise ValueError('採用アイコンのicnsが欠損しています')
-    for path in [contents / 'MacOS/HoneyObs', *[resources / name for name in
-                 ['vmlinuz', 'initramfs.gz', 'cloudflared', 'geo-v4.bin', 'geo-v6.bin']]]:
+    for path in [contents / 'MacOS/HoneyObs', contents / 'Helpers/HoneyObsSession', *[resources / name for name in
+                 ['vmlinuz', 'initramfs.gz', 'egress-initramfs.gz', 'geo-v4.bin', 'geo-v6.bin']]]:
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError('同梱実行資産が欠損しています: ' + str(path))
+    if (resources / 'cloudflared').exists():
+        raise ValueError('旧host cloudflaredが製品に残っています')
     for source, destination in [('Resources/Dashboard', resources / 'Dashboard'), ('third_party', resources / 'Licenses')]:
         for original in (ROOT / source).iterdir():
             if original.is_file() and original.read_bytes() != (destination / original.name).read_bytes():
