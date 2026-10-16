@@ -49,7 +49,7 @@ def curl(url, *args):
 class Session:
     def __init__(self, name, public=False):
         self.directory = OUT / name
-        self.directory.mkdir(parents=True)
+        self.directory.mkdir(mode=0o700, parents=True)
         self.log = (self.directory / 'app.log').open('w')
         self.canary = socket.socket()
         self.canary.bind(('127.0.0.1', 0))
@@ -60,7 +60,7 @@ class Session:
         if ip:
             targets.append(f'{ip}:{self.canary_port}')
         env = dict(os.environ, HONEYOBS_PROBE_TARGETS=','.join(targets))
-        command = [str(APP), '--headless', '--run-directory', str(self.directory)]
+        command = [str(APP), '--test-mode', '--headless', '--run-directory', str(self.directory)]
         if public:
             command.append('--public')
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT, env=env)

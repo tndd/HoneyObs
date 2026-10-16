@@ -12,9 +12,9 @@ def main():
     result = {}
     for name, flag in [('local', '--ui-smoke'), ('public-quit', '--ui-public-smoke')]:
         directory = base / name
-        directory.mkdir(parents=True)
+        directory.mkdir(mode=0o700, parents=True)
         with (directory / 'app.log').open('w') as log:
-            process = subprocess.Popen([str(APP), flag, '--run-directory', str(directory)], stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen([str(APP), '--test-mode', flag, '--run-directory', str(directory)], stdout=log, stderr=subprocess.STDOUT)
             try:
                 process.wait(timeout=260 if name == 'public-quit' else 30)
                 assert process.returncode == 0, process.returncode

@@ -32,7 +32,7 @@ summary={}
 for fault in ['freeze-main','freeze-ui']:
  run=out/fault;run.mkdir(mode=0o700)
  with (run/'app.log').open('w') as log:
-  process=subprocess.Popen([str(exe),'--ui-exercise-smoke','--run-directory',str(run)],stdout=log,stderr=log,cwd='/tmp')
+  process=subprocess.Popen([str(exe),'--test-mode','--ui-exercise-smoke','--run-directory',str(run)],stdout=log,stderr=log,cwd='/tmp')
   connection=None
   try:
    state=wait(lambda:(s if (s:=read(run/'state.json')).get('originPort') else None),40);port=state['originPort']
@@ -68,7 +68,7 @@ subprocess.run(['codesign','--force','--sign','-','--entitlements',str(root/'ent
 for fault in ['parent-stop','guardian-stop']:
  run=out/fault;run.mkdir(mode=0o700);guardian=tunnel=0
  with (run/'app.log').open('w') as log:
-  process=subprocess.Popen([str(fake/'Contents/MacOS/HoneyObs'),'--headless','--public','--run-directory',str(run)],stdout=log,stderr=log,cwd='/tmp')
+  process=subprocess.Popen([str(fake/'Contents/MacOS/HoneyObs'),'--test-mode','--headless','--public','--run-directory',str(run)],stdout=log,stderr=log,cwd='/tmp')
   try:
    guard=wait(lambda:read(run/'watchdog.json'),40);guardian=guard['watchdogPID'];tunnel=guard['tunnelPID']
    state=read(run/'state.json');port=state['originPort']

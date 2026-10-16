@@ -11,9 +11,9 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     report = {}
     directory = OUT / 'terminate-starting'
-    directory.mkdir()
+    directory.mkdir(mode=0o700)
     with (directory / 'app.log').open('w') as log:
-        process = subprocess.Popen([str(APP), '--headless', '--run-directory', str(directory)], stdout=log, stderr=log)
+        process = subprocess.Popen([str(APP), '--test-mode', '--headless', '--run-directory', str(directory)], stdout=log, stderr=log)
         try:
             wait(lambda: read(directory / 'state.json').get('active') is True)
             process.terminate()

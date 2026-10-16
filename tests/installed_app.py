@@ -25,7 +25,7 @@ for name in (sys.argv[1:] or ['complete','cancel','cancel-after-ip']):
  run=pathlib.Path(tempfile.mkdtemp(prefix='HoneyObs-installed-'+name+'-'));os.chmod(run,0o700)
  pid=None
  try:
-  subprocess.run(['open','-n','-a',str(app),'--args','--ui-exercise-smoke','--run-directory',str(run)],cwd='/tmp',check=True)
+  subprocess.run(['open','-n','-a',str(app),'--args','--test-mode','--ui-exercise-smoke','--run-directory',str(run)],cwd='/tmp',check=True)
   state=wait(lambda:(s if (s:=read(run/'state.json')).get('originPort') else None),45);pid=state['pid'];port=state['originPort']
   process=subprocess.check_output(['ps','-p',str(pid),'-o','command='],text=True).strip()
   assert process.startswith(str(app/'Contents/MacOS/HoneyObs')+' '),process
