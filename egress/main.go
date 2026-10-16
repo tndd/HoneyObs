@@ -146,11 +146,13 @@ func bridge() {
 	select {}
 }
 func noPrivileges() {
-	if _, _, e := syscall.Syscall6(syscall.SYS_PRCTL, 38, 1, 0, 0, 0, 0); e != 0 {
-		log.Fatal(e)
+	// GoのgoroutineはOS thread間を移動する。NNPは全threadへ設定し、
+	// 後続seccomp/execだけでなく別goroutineの隔離診断も同じ境界に置く。
+	if _, _, e := syscall.AllThreadsSyscall6(syscall.SYS_PRCTL, 38, 1, 0, 0, 0, 0); e != 0 {
+		log.Fatalf("prctl(PR_SET_NO_NEW_PRIVS): %v", e)
 	}
 	if _, _, e := syscall.Syscall6(syscall.SYS_PRCTL, 4, 0, 0, 0, 0, 0); e != 0 {
-		log.Fatal(e)
+		log.Fatalf("prctl(PR_SET_DUMPABLE): %v", e)
 	}
 }
 func status() map[string]any {
@@ -227,7 +229,7 @@ func cloudflared() {
 	fmt.Println("HONEYOBS_EGRESS_ISOLATION " + string(b))
 	args := []string{"cloudflared", "tunnel", "--config", "/config.yml", "--no-autoupdate", "--url", "http://127.0.0.1:7000", "--http-host-header", os.Getenv("ORIGIN_HOST"), "--protocol", "http2", "--edge", "127.0.0.1:7844", "--quick-service", "http://127.0.0.1:7002", "--ha-connections", "1", "--metrics", "127.0.0.1:0"}
 	if e := syscall.Exec("/cloudflared", args, []string{"HOME=/tmp", "GODEBUG=netdns=go"}); e != nil {
-		log.Fatal(e)
+		log.Fatalf("execve(/cloudflared): %v", e)
 	}
 }
 func modules() {

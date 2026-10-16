@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"syscall"
 	"unsafe"
 )
@@ -29,9 +30,15 @@ func restrictSockets() error {
 		Len    uint16
 		Filter *filter
 	}{uint16(len(filters)), &filters[0]}
-	_, _, e := syscall.Syscall(syscall.SYS_PRCTL, 22, 2, uintptr(unsafe.Pointer(&prog)))
+	// NNPと同様に既存の全Go runtime threadへ同期する。新threadとexecも
+	// このfilterを継承するので、socket処理のgoroutine移動に依存しない。
+	const setModeFilter, syncThreads = 1, 1
+	r, _, e := syscall.Syscall(syscall.SYS_SECCOMP, setModeFilter, syncThreads, uintptr(unsafe.Pointer(&prog)))
 	if e != 0 {
-		return e
+		return fmt.Errorf("seccomp(SECCOMP_SET_MODE_FILTER, TSYNC): %w", e)
+	}
+	if r != 0 {
+		return fmt.Errorf("seccomp(TSYNC): thread %d did not synchronize", r)
 	}
 	return nil
 }

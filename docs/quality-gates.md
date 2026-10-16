@@ -20,6 +20,8 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 
 このゲートは作業tree内にビルドした `.app` を使い、localhostの隔離検査、ライフサイクル、独立したPython自己ペネを実行します。`~/Applications` の置換、公開トンネル、実スリープ、ログアウト、シャットダウンは含みません。self-hosted runnerは検証専用とし、通常利用するMacに無断で登録しません。
 
+`python3 tests/egress_privileges.py` は同じ製品Goソースを専用Linux test binaryにし、NIC・共有・ディスクなしの私有VMで実行します。権限縮小とseccomp設定を意図的に別OS threadへ置き、UID65533・能力なし・NNP1・Seccomp2・IPv6 socket拒否を、既存thread・新thread・exec後に照合します。通信VM launcherのビルドは `CGO_ENABLED=0` が必須です。NNPの全thread同期がcgoの外部threadを検査できないためで、ビルドスクリプトで固定しています。同期不能やseccomp TSYNCの失敗threadIDは起動失敗として扱います。
+
 `tests/installed_app.py` と `tests/permit_faults.py` は導入済みアプリを対象にする別検証です。専用ゲートに自動混入させません。
 
 ## 製品と検証の境界

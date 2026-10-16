@@ -17,6 +17,7 @@ python3 tests/session_control.py
 python3 tests/session_jobs.py
 python3 tests/integration.py --local
 bash tests/lifecycle.sh
+python3 tests/egress_privileges.py
 bash tests/egress.sh --vm
 bash tests/egress_engine.sh
 python3 tests/final_observation.py

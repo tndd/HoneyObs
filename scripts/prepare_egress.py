@@ -31,6 +31,8 @@ def main():
     kernel = CACHE / 'linux-virt.apk'
     if not kernel.exists() or hashlib.sha256(kernel.read_bytes()).hexdigest() != prepare.DEPENDENCIES[0][2]:
         raise RuntimeError('検証済みkernelがありません。先にscripts/prepare.pyを実行してください')
+    # NNPを全Go threadへ同期するAllThreadsSyscallはcgo外部threadを扱えない。
+    # CGO_ENABLED=0は通信VM launcherの権限境界の必須ビルド条件。
     subprocess.run(['go', 'build', '-trimpath', '-ldflags=-s -w', '-o', str(CACHE / 'egress-init'), '.'],
                    cwd=ROOT / 'egress', env=dict(os.environ, GOOS='linux', GOARCH='arm64', CGO_ENABLED='0'), check=True)
     files = [(p, stat.S_IFDIR | 0o755, b'') for p in ['proc', 'sys', 'dev', 'tmp', 'modules']]
