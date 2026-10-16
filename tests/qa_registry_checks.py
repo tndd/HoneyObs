@@ -178,5 +178,32 @@ integration.main()
         self.assertEqual(len(calls), 1)  # 明示成功後のatexitでは再実行しない。
 
 
+class BackgroundSessionPreflightChecks(unittest.TestCase):
+    def test_unlocked_console_keeps_existing_ui_gate(self):
+        from app_background import session_blocker
+        self.assertIsNone(session_blocker({'available':True, 'locked':False, 'onConsole':True}))
+        self.assertIsNotNone(session_blocker({'available':False}))
+        self.assertIsNotNone(session_blocker({'available':True, 'locked':False, 'onConsole':False}))
+
+    def test_locked_session_records_blocker_without_launch_or_pass(self):
+        import app_background
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result'
+            report = {'cases':{}}
+            stdout = io.StringIO()
+            with patch.object(app_background, 'OUT', output), patch.object(app_background, 'REPORT', report), \
+                 patch.object(app_background, 'session_state', return_value={'available':True, 'locked':True, 'onConsole':True}), \
+                 patch.object(app_background.subprocess, 'Popen') as launch, \
+                 patch.object(sys, 'argv', ['app_background.py']), contextlib.redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as caught:
+                    app_background.main()
+                self.assertIn('BLOCKED', str(caught.exception))
+                launch.assert_not_called()
+            saved = json.loads((output / 'report.json').read_text())
+            self.assertIn('ロック中', saved['blocked'])
+            self.assertEqual(saved['cases'], {})
+            self.assertNotIn('PASS', stdout.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()
