@@ -1,0 +1,13 @@
+#!/bin/bash
+# VM・同梱カーネル・ネットワーク・インストール済みアプリを使わない検証。
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p test-results/unit-bin
+swiftc -swift-version 5 Sources/HoneyObs/{GeoIP,ObservedEvent,ObservationStore}.swift \
+  tests/ObservationChecks.swift -o test-results/unit-bin/observations
+test-results/unit-bin/observations
+# 許可の製品実装を直接リンクする。Virtualization.frameworkへリンクするがVMは生成しない。
+swiftc -swift-version 5 -framework Network -framework Virtualization \
+  Sources/HoneyObs/Relay.swift tests/PermitChecks.swift -o test-results/unit-bin/permit
+test-results/unit-bin/permit
+python3 tests/install_checks.py
