@@ -121,3 +121,34 @@ func TestQAPipelineCannotForwardSecondAuthentication(t *testing.T) {
 		t.Fatal("pipelined authentication reached origin")
 	}
 }
+
+func TestQABodyLimitIsRecordedBeforeOriginAndCanonicalizesChunking(t *testing.T) {
+	for _, chunked := range []bool{false, true} {
+		for _, size := range []int{qaRequestBodyLimit, qaRequestBodyLimit + 1} {
+			calls := 0
+			backend := qaTestTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil || len(body) != size || r.ContentLength != int64(size) || len(r.TransferEncoding) != 0 || r.Trailer != nil {
+					t.Fatal("request framing was not bounded and canonical")
+				}
+				return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("not found"))}, nil
+			})
+			r := httptest.NewRequest("POST", "http://origin.invalid/body", strings.NewReader(strings.Repeat("x", size)))
+			r.Header.Set("Cookie", qaTestCookie())
+			if chunked {
+				r.ContentLength = -1
+				r.TransferEncoding = []string{"chunked"}
+			}
+			w := httptest.NewRecorder()
+			qaHandler(qaTestKey(), backend, time.Now().Add(time.Minute), time.Now).ServeHTTP(w, r)
+			if size > qaRequestBodyLimit {
+				if w.Code != 413 || calls != 0 || w.Header().Get("X-HoneyObs-QA-Stage") != "request" {
+					t.Fatal("oversized body reached origin or lost its rejection status")
+				}
+			} else if w.Code != 404 || calls != 1 {
+				t.Fatal("valid bounded body rejected")
+			}
+		}
+	}
+}

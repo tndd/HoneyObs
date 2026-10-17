@@ -27,6 +27,7 @@ import (
 
 const qaCookieName = "__Host-HoneyObs-QA"
 const qaLifetime = 10 * time.Minute
+const qaRequestBodyLimit = 8192
 
 func qaKeyRequired(cmdline string) (bool, error) {
 	count := 0
@@ -222,7 +223,31 @@ func qaHandler(key []byte, transport http.RoundTripper, expires time.Time, now f
 			audit.Authorized = true
 			audit.mu.Unlock()
 		}
+		// 小さな有限バッファへ正規化し、早期413で中継の書き込みが切断される競合を避ける。
+		// 拒否は認証入口の監査記録へ残し、おとりVMへは接続しない。
+		w.Header().Set("X-HoneyObs-QA-Stage", "request")
+		if r.ContentLength > qaRequestBodyLimit {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		var requestBody []byte
+		if r.Body != nil {
+			var err error
+			requestBody, err = io.ReadAll(io.LimitReader(r.Body, qaRequestBodyLimit+1))
+			if err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+			if len(requestBody) > qaRequestBodyLimit {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
 		request := r.Clone(r.Context())
+		request.Body = io.NopCloser(bytes.NewReader(requestBody))
+		request.ContentLength = int64(len(requestBody))
+		request.TransferEncoding = nil
+		request.Header.Del("Content-Length")
 		request.Header.Del("Cookie")
 		for _, c := range r.Cookies() {
 			if c.Name != qaCookieName {
