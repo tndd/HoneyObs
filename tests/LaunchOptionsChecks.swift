@@ -27,6 +27,32 @@ import Foundation
         let privateBase = ["HoneyObs", "--test-mode", "--run-directory", run.path]
         let privateOptions = try LaunchOptions(arguments: privateBase + ["--allowed-mail", "owner+qa@example.com"])
         precondition(privateOptions.allowedMail == "owner+qa@example.com")
+        let keyFile = run.appendingPathComponent("qa-key.bin")
+        try Data((0..<32).map(UInt8.init)).write(to:keyFile)
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:keyFile.path)
+        let keyArguments = privateBase + ["--public", "--qa-key-file", keyFile.path]
+        let keyed = try LaunchOptions(arguments:keyArguments)
+        let key = keyed.qaAccessKey!
+        precondition(key.derived(for:"one.invalid").count == 32)
+        precondition(key.derived(for:"one.invalid") != key.derived(for:"two.invalid"))
+        precondition(normal.qaAccessKey == nil && options.qaAccessKey == nil)
+        rejected(["HoneyObs","--qa-key-file",keyFile.path])
+        rejected(privateBase + ["--qa-key-file",keyFile.path])
+        rejected(privateBase + ["--public","--qa-key-file"])
+        rejected(keyArguments + ["--qa-key-file",keyFile.path])
+        rejected(keyArguments + ["--allowed-mail","owner@example.com"])
+        rejected(keyArguments + ["--local-origin"])
+        let keyLink = run.appendingPathComponent("key-link")
+        try FileManager.default.createSymbolicLink(at:keyLink,withDestinationURL:keyFile)
+        rejected(privateBase + ["--public","--qa-key-file",keyLink.path])
+        try FileManager.default.setAttributes([.posixPermissions:0o644],ofItemAtPath:keyFile.path)
+        rejected(keyArguments)
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:keyFile.path)
+        let hardLink = run.appendingPathComponent("key-hardlink")
+        try FileManager.default.linkItem(at:keyFile,to:hardLink)
+        rejected(keyArguments)
+        try FileManager.default.removeItem(at:hardLink)
+        for count in [31,33] { try Data(repeating:1,count:count).write(to:keyFile); rejected(keyArguments) }
         rejected(privateBase + ["--allowed-mail"])
         rejected(privateBase + ["--allowed-mail", "owner@example.com", "--allowed-mail", "owner@example.com"])
         for invalid in ["", "*", "*@example.com", "one@example.com,two@example.com", "owner@example.com\n", "a@localhost", "a@-example.com"] {

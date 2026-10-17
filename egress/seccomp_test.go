@@ -26,10 +26,14 @@ func TestMain(m *testing.M) {
 	}
 	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
 		fmt.Println("HONEYOBS_PRIVILEGES_FAIL mount:", err)
-	} else if m.Run() == 0 {
-		fmt.Println("HONEYOBS_PRIVILEGES_PASS")
 	} else {
-		fmt.Println("HONEYOBS_PRIVILEGES_FAIL tests")
+		// NICは追加せず、製品と同じloopbackだけをHTTP入口の検証に使う。
+		loopback()
+		if m.Run() == 0 {
+			fmt.Println("HONEYOBS_PRIVILEGES_PASS")
+		} else {
+			fmt.Println("HONEYOBS_PRIVILEGES_FAIL tests")
+		}
 	}
 	for {
 		syscall.Pause()

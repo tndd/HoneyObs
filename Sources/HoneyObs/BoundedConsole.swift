@@ -11,10 +11,14 @@ final class BoundedConsole {
     private let limit: Int
     private let capturePattern: NSRegularExpression?
     private var captureCarry = Data(), firstCapture: String?
+    private let marker: String?
+    private let onMarker: (() -> Void)?
+    private var markerSeen = false
     var capturedValue: String? { queue.sync { firstCapture } }
     private let onFailure: ((Error) -> Void)?
-    init(url: URL, limit: Int = 262144, capturePattern: String? = nil, onFailure: ((Error) -> Void)? = nil) throws {
+    init(url: URL, limit: Int = 262144, capturePattern: String? = nil, marker: String? = nil, onMarker: (() -> Void)? = nil, onFailure: ((Error) -> Void)? = nil) throws {
         self.limit = max(limit,8192); self.onFailure = onFailure
+        self.marker = marker; self.onMarker = onMarker
         self.capturePattern = try capturePattern.map { try NSRegularExpression(pattern:$0) }
         let fd = Darwin.open(url.path,O_CREAT|O_TRUNC|O_WRONLY|O_NOFOLLOW|O_CLOEXEC,0o600)
         guard fd >= 0 else { throw POSIXError(.EIO) }
@@ -34,12 +38,16 @@ final class BoundedConsole {
                     if errno == EAGAIN || errno == EINTR { return }; throw POSIXError(.EIO)
                 }
                 if n == 0 { return }
-                if firstCapture == nil, let capturePattern {
+                if (firstCapture == nil && capturePattern != nil) || (!markerSeen && marker != nil) {
                     let combined = captureCarry + Data(buffer.prefix(n))
                     let text = String(decoding:combined,as:UTF8.self)
-                    if let match = capturePattern.firstMatch(in:text,range:NSRange(text.startIndex...,in:text)),
+                    if firstCapture == nil, let capturePattern, let match = capturePattern.firstMatch(in:text,range:NSRange(text.startIndex...,in:text)),
                        let range = Range(match.range,in:text) { firstCapture = String(text[range]) }
-                    captureCarry = firstCapture == nil ? Data(combined.suffix(256)) : Data()
+                    if !markerSeen, let marker, text.contains(marker) {
+                        markerSeen = true
+                        DispatchQueue.main.async { [onMarker] in onMarker?() }
+                    }
+                    captureCarry = firstCapture == nil || (!markerSeen && marker != nil) ? Data(combined.suffix(256)) : Data()
                 }
                 if failed { continue }
                 if bytes+n > limit { try output.truncate(atOffset:0); try output.seek(toOffset:0); bytes = 0 }

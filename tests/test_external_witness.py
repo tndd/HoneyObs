@@ -49,6 +49,16 @@ class ExternalWitnessChecks(unittest.TestCase):
         self.assertTrue(stopped_only["externalStoppedStateObserved"])
         self.assertFalse(stopped_only["externalTransitionObserved"])
 
+    def test_key_gate_requires_exact_public_tag_and_never_accepts_email_fallback(self):
+        host, tag = "own-test.trycloudflare.com", "a" * 64
+        headers = {"server": "cloudflare", "cf-ray": "a4c1e8667be3ef1e-NRT", "x-honeyobs-qa-gate": tag}
+        self.assertEqual(witness.classify(host, 401, headers, b"Authentication required", tag), "login-required")
+        self.assertEqual(witness.classify(host, 401, headers, b"Authentication required", "b" * 64), "unexpected-response")
+        self.assertEqual(witness.classify(host, 401, {}, b"Authentication required", tag), "unexpected-response")
+        self.assertEqual(witness.classify(host, 401, headers, b"Authentication required"), "unexpected-response")
+        redirect = {"location": "https://login.trycloudflare.com/authorize?hostname=" + host}
+        self.assertEqual(witness.classify(host, 302, redirect, b"", tag), "unexpected-response")
+
 
 if __name__ == "__main__":
     unittest.main()

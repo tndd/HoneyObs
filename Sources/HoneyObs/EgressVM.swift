@@ -1,5 +1,6 @@
 import Foundation
 import Virtualization
+import Darwin
 
 // 通信VMもNIC・ディスク・共有ディレクトリを持たない。ゲストからの接続は
 // 9000=固定origin、9001=固定POSTを一度だけ、9002=固定edge。
@@ -8,6 +9,9 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     let resources: URL, directory: URL
     private let originPort: UInt16, originHost: String, permit: ForwardingPermit
     private let allowedMail: String?
+    private let qaAccessKey: Data?
+    private var qaInput: Pipe?
+    private var qaKeySent = false, qaDeadline = 0.0
     private let onFailure: (String) -> Void
     private var machine: VZVirtualMachine?
     private var console: BoundedConsole?
@@ -24,7 +28,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private(set) var lastHealthAt = 0.0
     private(set) var status: [String: Any] = [:]
     var healthy: Bool { active && safetyTime() - lastHealthAt < 2 }
-    var shutdownComplete: Bool { !active && machine == nil && console == nil && streams.isEmpty && listeners.isEmpty && !healthPending && !stopping && !stopFailed && testPendingCount == 0 }
+    var shutdownComplete: Bool { !active && machine == nil && console == nil && qaInput == nil && streams.isEmpty && listeners.isEmpty && !healthPending && !stopping && !stopFailed && testPendingCount == 0 }
     var canStart: Bool { shutdownComplete }
     var requiresSessionRecovery: Bool { stopFailed }
     private var acquiredURL = ""
@@ -44,28 +48,39 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private var testPending: [UUID: VZVirtioSocketConnection] = [:]
     #endif
 
-    init(resources: URL, directory: URL, originPort: UInt16, originHost: String, permit: ForwardingPermit, allowedMail: String? = nil, onFailure: @escaping (String) -> Void) {
+    init(resources: URL, directory: URL, originPort: UInt16, originHost: String, permit: ForwardingPermit, allowedMail: String? = nil, qaAccessKey: Data? = nil, onFailure: @escaping (String) -> Void) {
         self.resources = resources; self.directory = directory; self.originPort = originPort; self.originHost = originHost
         self.permit = permit; self.onFailure = onFailure
         self.allowedMail = allowedMail
+        self.qaAccessKey = qaAccessKey
     }
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
         guard canStart, originPort != 0, permit.valid else { completion(.failure(error("通信VMを開始できません"))); return }
         guard allowedMail.map(EgressPolicy.validRecipient) ?? true else { completion(.failure(error("本人限定の認証先が不正です"))); return }
+        guard qaAccessKey == nil || (qaAccessKey?.count == 32 && allowedMail == nil) else { completion(.failure(error("検証鍵の指定が不正です"))); return }
         active = true; acquiredURL = ""; failed = false; stopFailed = false; provisioned = false; edgeAttempts = []; lastHealthAt = 0; started = safetyTime(); startCallback = completion
         do {
+            qaKeySent = false; qaDeadline = qaAccessKey == nil ? 0 : safetyTime() + 600
+            if qaAccessKey != nil {
+                qaInput = Pipe()
+                let fd = qaInput!.fileHandleForWriting.fileDescriptor
+                guard fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0 else { throw error("検証鍵の入力を準備できません") }
+            }
             let config = VZVirtualMachineConfiguration(); config.cpuCount = 1; config.memorySize = 256 * 1024 * 1024
             let boot = VZLinuxBootLoader(kernelURL: resources.appendingPathComponent("vmlinuz"))
             boot.initialRamdiskURL = resources.appendingPathComponent("egress-initramfs.gz")
             boot.commandLine = "console=hvc0 rdinit=/init panic=0 quiet honeyobs.host=\(originHost)"
             if let allowedMail { boot.commandLine += " honeyobs.allowedmail=" + Data(allowedMail.utf8).base64EncodedString() }
+            if qaAccessKey != nil { boot.commandLine += " honeyobs.qaauth=1" }
             config.bootLoader = boot; config.networkDevices = []; config.storageDevices = []; config.directorySharingDevices = []
             config.socketDevices = [VZVirtioSocketDeviceConfiguration()]; config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let log = directory.appendingPathComponent("tunnel.log")
-            console = try BoundedConsole(url: log, capturePattern:EgressPolicy.publicURLPattern) { [weak self] error in self?.fail("通信VMのログ保存失敗: " + error.localizedDescription) }
+            console = try BoundedConsole(url: log, capturePattern:EgressPolicy.publicURLPattern,
+                marker: qaAccessKey == nil ? nil : "HONEYOBS_QA_KEY_READY",
+                onMarker: { [weak self] in self?.deliverQAKey() }) { [weak self] error in self?.fail("通信VMのログ保存失敗: " + error.localizedDescription) }
             let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!.writer)
+            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: qaInput?.fileHandleForReading ?? FileHandle(forReadingAtPath: "/dev/null"), fileHandleForWriting: console!.writer)
             config.serialPorts = [serial]; try config.validate()
             let vm = VZVirtualMachine(configuration: config); machine = vm; vm.delegate = self
             guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else { throw error("通信VMのvsockがありません") }
@@ -113,9 +128,24 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
         }
         streams[id] = stream; stream.start(); return true
     }
+    private func deliverQAKey() {
+        guard active, !stopping, !qaKeySent, permit.valid, let key = qaAccessKey, let input = qaInput else { return }
+        let line = key.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") + "\n"
+        let data = Data(line.utf8)
+        let written = data.withUnsafeBytes { Darwin.write(input.fileHandleForWriting.fileDescriptor, $0.baseAddress, $0.count) }
+        guard written == data.count else { fail("検証鍵の入力に失敗しました"); return }
+        qaKeySent = true
+    }
     private func checkHealth() {
         guard active, let vm = machine else { return }
         guard permit.valid else { fail("通信VMの転送許可が失効しました"); return }
+        if qaAccessKey != nil {
+            guard safetyTime() < qaDeadline else { fail("検証鍵の10分の期限に達しました"); return }
+            if !qaKeySent {
+                if safetyTime() - started > 5 { fail("検証鍵の受け渡し期限を超えました") }
+                return
+            }
+        }
         if lastHealthAt > 0 && safetyTime() - lastHealthAt >= 2 { fail("通信VMの応答期限を超えました"); return }
         if lastHealthAt == 0 && safetyTime() - started > 30 { fail("通信VMの起動期限を超えました"); return }
         guard !healthPending else { return }; healthPending = true
@@ -156,6 +186,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
         stopCallbacks.append(completion)
         guard !stopping else { return }; stopping = true; active = false; stopRequested = false; stopStarted = safetyTime()
         healthTimer?.invalidate(); healthTimer = nil
+        try? qaInput?.fileHandleForWriting.close()
         let callback = startCallback; startCallback = nil; callback?(.failure(error("通信VMの開始を取り消しました")))
         if let device = machine?.socketDevices.first as? VZVirtioSocketDevice { for port in listeners.keys { device.removeSocketListener(forPort: port) } }
         listeners.removeAll()
@@ -180,7 +211,10 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
                 }
             }
         }
-        if machine == nil { closeConsole() }
+        if machine == nil {
+            try? qaInput?.fileHandleForWriting.close(); try? qaInput?.fileHandleForReading.close(); qaInput = nil
+            closeConsole()
+        }
         if machine == nil && console == nil && streams.isEmpty && !healthPending && testPendingCount == 0 { finishStop(!stopFailed) }
         else if safetyTime() - stopStarted > 8 { stopFailed = true; finishStop(false) }
     }

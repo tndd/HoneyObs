@@ -13,11 +13,12 @@ struct LaunchOptions {
     let exerciseSmoke: Bool
     let probeTargets: String
     let allowedMail: String?
+    let qaAccessKey: QAAccessKey?
 
     init(arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment,
          defaultDirectory: URL? = nil) throws {
         testing = arguments.contains("--test-mode")
-        let restricted = ["--headless", "--public", "--local-origin", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke", "--allowed-mail"]
+        let restricted = ["--headless", "--public", "--local-origin", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke", "--allowed-mail", "--qa-key-file"]
         guard testing || !restricted.contains(where: arguments.contains) else {
             throw Self.invalid("検証用フラグには --test-mode と私有の --run-directory が必要です")
         }
@@ -46,6 +47,14 @@ struct LaunchOptions {
                 directory = try SessionArchive.makeDirectory(root:root)
             }
         }
+        let keyIndices = arguments.indices.filter { arguments[$0] == "--qa-key-file" }
+        if let index = keyIndices.first {
+            guard testing, arguments.contains("--public"), !arguments.contains("--local-origin"), allowedMail == nil,
+                  keyIndices.count == 1, index + 1 < arguments.count, arguments[index + 1].hasPrefix("/") else {
+                throw Self.invalid("検証鍵は明示した公開QAで一度だけ指定し、メール方式とは併用できません")
+            }
+            qaAccessKey = try QAAccessKey(file: URL(fileURLWithPath: arguments[index + 1]).standardizedFileURL, directory: directory)
+        } else { qaAccessKey = nil }
         headless = testing && arguments.contains("--headless")
         uiSmoke = testing && arguments.contains("--ui-smoke")
         uiPublicSmoke = testing && arguments.contains("--ui-public-smoke")

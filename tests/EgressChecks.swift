@@ -66,7 +66,9 @@ import Darwin
         let deadline = Date().addingTimeInterval(seconds)
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     }
-    static func vm(root: URL, protected: Bool = false) throws {
+    static func vm(root: URL, protected: Bool = false, keyed: Bool = false) throws {
+        precondition(!(protected && keyed))
+        let qaKey = keyed ? Data((0..<32).map(UInt8.init)) : nil
         let directory = root.appendingPathComponent("test-results/egress-vm-\(getpid())")
         let permit = ForwardingPermit(confirmedAt:safetyTime())
         var renewal: Timer? = Timer.scheduledTimer(withTimeInterval:0.2,repeats:true){_ in _ = permit.renew(confirmedAt:safetyTime())}
@@ -84,15 +86,15 @@ import Darwin
             }
         }
         fake.start(queue:.main); wait(until:{fakePort != 0},seconds:3); check(fakePort != 0,"fake edge listener")
-        var failure = "", ready = false, apiRequests = 0, apiAllowed = false, edgeChannels = 0, badSNIDeniedBeforeAPI = false, pending: [UUID:EgressStream] = [:]
-        let subject = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,allowedMail:protected ? "owner@example.com" : nil,onFailure:{failure=$0})
+        var failure = "", ready = false, apiRequests = 0, apiAllowed = false, edgeChannels = 0, originRequests = 0, badSNIDeniedBeforeAPI = false, pending: [UUID:EgressStream] = [:]
+        let subject = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,allowedMail:protected ? "owner@example.com" : nil,qaAccessKey:qaKey,onFailure:{failure=$0})
         subject.testHandler = {port,connection,finished in
             if port == 9002 {
                 edgeChannels += 1
                 let id = UUID(); let stream = EgressStream(guest:connection,host:"127.0.0.1",port:fakePort,mode:.edge,permit:permit){pending.removeValue(forKey:id);finished()}
                 pending[id]=stream;stream.start();return
             }
-            if port == 9000 { connection.close();finished();return }
+            if port == 9000 { originRequests += 1; connection.close();finished();return }
             if port == 9003 { connection.close();finished();return } // このoffline試験では公開鍵も外へ取得しない。
             apiRequests += 1; badSNIDeniedBeforeAPI = captured == 0 && edgeChannels == 2
             DispatchQueue.global().async {
@@ -126,6 +128,12 @@ import Darwin
         check(ready,"root health validates cloudflared: \(failure); \(log.suffix(1800))")
         check(apiRequests == 1 && apiAllowed,"real cloudflared fixed provisioning")
         if protected { check(log.contains("protected quick Tunnel") && log.contains("One-Time PIN"), "real cloudflared enables recipient authentication") }
+        if let qaKey {
+            let encoded = qaKey.base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
+            check(log.contains("HONEYOBS_QA_BOUNDARY_VERIFIED"),"real bridge rejects missing and forged keys before provisioning")
+            check(originRequests == 0,"unauthorized requests never open the honeypot origin")
+            check(!log.contains(encoded),"console transport does not echo the key")
+        }
         check(captured > 0 && badSNIDeniedBeforeAPI && !foreignSNIReachedFake,"two foreign SNI attempts make zero fake-edge connections; one actual cloudflared SNI passes (channels \(edgeChannels), dials \(captured)): \(log.suffix(1200))")
         guard let line = log.components(separatedBy:"\n").first(where:{$0.contains("HONEYOBS_EGRESS_ISOLATION ")}),let range=line.range(of:"HONEYOBS_EGRESS_ISOLATION "),let data=String(line[range.upperBound...]).data(using:.utf8),let isolation=try? JSONSerialization.jsonObject(with:data) as? [String:Any] else{check(false,"VM isolation report missing: \(log.prefix(2000))");return}
         check(isolation["interfaces"] as? [String] == ["lo"],"no VM NIC")
@@ -135,7 +143,7 @@ import Darwin
         let report: [String:Any] = ["configuredMemoryMiB":256,"bootToFakeEdgeSeconds":bootSeconds,"apiRequests":apiRequests,"fakeEdgeConnections":captured,"health":snapshot,"isolation":isolation,"shutdownComplete":subject.shutdownComplete,"externalPublication":false,"protectedProvision":protected]
         try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent("report.json"))
         let earlyPermit = ForwardingPermit(confirmedAt:safetyTime())
-        let early = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory.appendingPathComponent("early-stop"),originPort:12345,originHost:"egress-early.invalid",permit:earlyPermit,onFailure:{_ in})
+        let early = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory.appendingPathComponent("early-stop"),originPort:12345,originHost:"egress-early.invalid",permit:earlyPermit,qaAccessKey:qaKey,onFailure:{_ in})
         var startReplies = 0, earlyStopped: Bool?
         early.testHandler = {_,connection,finished in connection.close();finished()}
         early.start{_ in startReplies += 1};early.stop{earlyStopped=$0}
@@ -145,6 +153,6 @@ import Darwin
     }
     static func main() throws {
         policy()
-        if CommandLine.arguments.contains("--vm") {try vm(root:URL(fileURLWithPath:CommandLine.arguments[1]),protected:CommandLine.arguments.contains("--protected"))}
+        if CommandLine.arguments.contains("--vm") {try vm(root:URL(fileURLWithPath:CommandLine.arguments[1]),protected:CommandLine.arguments.contains("--protected"),keyed:CommandLine.arguments.contains("--keyed"))}
     }
 }

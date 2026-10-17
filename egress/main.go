@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -118,10 +119,22 @@ func forward(local net.Conn, port uint32) {
 	<-done
 }
 func bridge() {
+	qaKey, err := bridgeQAKey(os.Getenv("QA_AUTH_REQUIRED"), os.Getenv("QA_ACCESS_KEY"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	ports := []struct {
 		local  string
 		remote uint32
 	}{{"127.0.0.1:7000", 9000}, {"127.0.0.1:7002", 9001}, {"127.0.0.1:7844", 9002}}
+	if qaKey != nil {
+		l, err := net.Listen("tcp4", "127.0.0.1:7000")
+		if err != nil {
+			log.Fatal("QA authentication listener unavailable")
+		}
+		go serveQA(l, qaKey)
+		ports = ports[1:]
+	}
 	if os.Getenv("ALLOWED_MAIL") != "" {
 		ports = append(ports, struct {
 			local  string
@@ -313,12 +326,26 @@ func initVM() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	qaRequired, err := qaKeyRequired(string(cmd))
+	if err != nil || (qaRequired && recipient != "") {
+		log.Fatal("invalid QA authentication configuration")
+	}
+	var qaKey []byte
+	if qaRequired {
+		qaKey, err = readQAConsole()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	if e := syscall.Mount("rootfs", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); e != nil {
 		log.Fatal(e)
 	}
 	start := func(mode string, uid uint32) *exec.Cmd {
 		c := exec.Command("/init", mode)
 		c.Env = []string{"ORIGIN_HOST=" + origin, "ALLOWED_MAIL=" + recipient}
+		if mode == "bridge" && qaRequired {
+			c.Env = append(c.Env, "QA_AUTH_REQUIRED=1", "QA_ACCESS_KEY="+base64.RawURLEncoding.EncodeToString(qaKey))
+		}
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid}}
@@ -341,6 +368,11 @@ func initVM() {
 	}
 	if !ready {
 		log.Fatal("bridge timeout")
+	}
+	if qaRequired {
+		if err := verifyQABridge(origin, qaKey); err != nil {
+			log.Fatal(err)
+		}
 	}
 	c := start("cloudflared", 65533)
 	go serveHealth(b.Process.Pid, c.Process.Pid)

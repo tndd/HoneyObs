@@ -14,6 +14,10 @@ on:
         description: 本人限定を確認済みのQuick Tunnel URL（停止の独立観測だけを実行）
         type: string
         default: ''
+      external_gate_tag:
+        description: 鍵方式の入口が公開するSHA256識別子（秘密鍵・Cookieは入力しない）
+        type: string
+        default: ''
       witness_seconds:
         description: 外部観測の時間（30〜600秒）
         type: number
@@ -118,18 +122,21 @@ jobs:
         if: inputs.witness_phase != 'stopped'
         env:
           WITNESS_URL: ${{ inputs.external_url }}
-        run: python3 tests/external_witness.py --url "$WITNESS_URL" --baseline-only --output test-results/external-witness/preflight.json
+          WITNESS_GATE_TAG: ${{ inputs.external_gate_tag }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --gate-tag "$WITNESS_GATE_TAG" --baseline-only --output test-results/external-witness/preflight.json
       - name: 未認証の転送とCloudflare 1033を新規・継続接続で観測
         if: inputs.witness_phase != 'stopped'
         env:
           WITNESS_URL: ${{ inputs.external_url }}
           WITNESS_SECONDS: ${{ inputs.witness_seconds }}
-        run: python3 tests/external_witness.py --url "$WITNESS_URL" --seconds "$WITNESS_SECONDS" --output test-results/external-witness/report.json
+          WITNESS_GATE_TAG: ${{ inputs.external_gate_tag }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --gate-tag "$WITNESS_GATE_TAG" --seconds "$WITNESS_SECONDS" --output test-results/external-witness/report.json
       - name: 停止後の状態を外部から再確認
         if: inputs.witness_phase == 'stopped'
         env:
           WITNESS_URL: ${{ inputs.external_url }}
-        run: python3 tests/external_witness.py --url "$WITNESS_URL" --stopped-only --output test-results/external-witness/report.json
+          WITNESS_GATE_TAG: ${{ inputs.external_gate_tag }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --gate-tag "$WITNESS_GATE_TAG" --stopped-only --output test-results/external-witness/report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
