@@ -40,10 +40,11 @@ def classify(host, status, headers, body):
             and location.netloc == location.hostname and location.path == "/authorize"
             and urllib.parse.parse_qs(location.query).get("hostname") == [host]):
         return "login-required"
+    error_1033 = (b"1033" in body and b"cloudflare" in body.lower() and b"tunnel" in body.lower())
+    error_1033 = error_1033 or re.fullmatch(rb"\s*error code:\s*1033\s*", body) is not None
     if (status == 530 and headers.get("server", "").lower() == "cloudflare"
             and re.fullmatch(r"[a-f0-9]{16,32}-[A-Z0-9]{3}", headers.get("cf-ray", ""))
-            and b"1033" in body and b"cloudflare" in body.lower()
-            and b"tunnel" in body.lower()):
+            and error_1033):
         return "tunnel-unavailable-1033"
     return "unexpected-response"
 
@@ -68,7 +69,7 @@ def observe(host, connection, marker, channel):
         body = response.read(65537)
         headers = {k.lower(): v for k, v in response.getheaders()}
         result.update(status=response.status, bodySHA256=hashlib.sha256(body).hexdigest(),
-                      bodyBytes=len(body), cloudflareRay=headers.get("cf-ray", ""),
+                      bodyBytes=len(body), cloudflareRay=headers.get("cf-ray", ""), server=headers.get("server", ""),
                       classification=classify(host, response.status, headers, body)
                       if len(body) <= 65536 else "oversized-response")
     except (OSError, http.client.HTTPException) as error:
@@ -99,7 +100,9 @@ def conclusion(rows):
     passed = all(d["initialPrivateGateObserved"] and d["final1033Observed"]
                  and not d["gateReturnedAfter1033"] and d["indeterminateSamples"] == 0 for d in details.values())
     passed = passed and details["persistent"]["sameTCPConnectionAcrossStop"]
-    return {"externalTransitionObserved": passed, "channels": details,
+    stopped = all(d["final1033Observed"] and not d["gateReturnedAfter1033"]
+                  and d["indeterminateSamples"] == 0 for d in details.values())
+    return {"externalTransitionObserved": passed, "externalStoppedStateObserved": stopped, "channels": details,
             "authenticatedDeliveryVerified": False, "physicalSleepVerified": False}
 
 
@@ -107,7 +110,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True)
     parser.add_argument("--seconds", type=int, default=240)
-    parser.add_argument("--baseline-only", action="store_true")
+    phase = parser.add_mutually_exclusive_group()
+    phase.add_argument("--baseline-only", action="store_true")
+    phase.add_argument("--stopped-only", action="store_true")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
     host = target_host(args.url)
@@ -119,10 +124,10 @@ def main():
     persistent = http.client.HTTPSConnection(host, timeout=4, context=context)
     marker = "/qa-stop-witness-" + uuid.uuid4().hex
     started = time.time()
-    duration = 6 if args.baseline_only else args.seconds
+    duration = 6 if args.baseline_only or args.stopped_only else args.seconds
     deadline = time.monotonic() + duration
     report = {"hostname": host, "startedAt": started, "durationSeconds": duration,
-              "baselineOnly": args.baseline_only,
+              "baselineOnly": args.baseline_only, "stoppedOnly": args.stopped_only,
               "credentialsUsed": False, "observations": []}
     try:
         while time.monotonic() < deadline:
@@ -135,7 +140,8 @@ def main():
             report["observations"].extend(rows)
             args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print(utc(time.time()), " ".join(r["channel"] + ":" + r["classification"] for r in rows), flush=True)
-            if any(r["classification"] == "unexpected-response" for r in rows):
+            baseline_ok = all(d["initialPrivateGateObserved"] for d in conclusion(report["observations"])["channels"].values())
+            if any(r["classification"] == "unexpected-response" for r in rows) and not baseline_ok:
                 break
             time.sleep(max(0, min(2 - (time.monotonic() - tick), deadline - time.monotonic())))
     finally:
@@ -145,6 +151,8 @@ def main():
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     if args.baseline_only:
         return 0 if all(d["initialPrivateGateObserved"] and d["indeterminateSamples"] == 0 for d in report["channels"].values()) else 1
+    if args.stopped_only:
+        return 0 if report["externalStoppedStateObserved"] else 1
     return 0 if report["externalTransitionObserved"] else 1
 
 

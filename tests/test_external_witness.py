@@ -25,8 +25,10 @@ class ExternalWitnessChecks(unittest.TestCase):
         self.assertEqual(witness.classify("other.trycloudflare.com", 302, login, b""), "unexpected-response")
         error = {"server": "cloudflare", "cf-ray": "a4c1e8667be3ef1e-NRT"}
         self.assertEqual(witness.classify(host, 530, error, b"Error 1033 Cloudflare Tunnel error"), "tunnel-unavailable-1033")
+        self.assertEqual(witness.classify(host, 530, error, b"error code: 1033\n"), "tunnel-unavailable-1033")
         for status, headers, body in ((503, error, b"1033 Cloudflare Tunnel"), (530, {}, b"1033 Cloudflare Tunnel"),
-                                      (530, error, b"unrelated error"), (404, {}, b"Not found")):
+                                      (530, error, b"unrelated error"), (404, {}, b"Not found"),
+                                      (530, error, b"error code: 1016\n")):
             self.assertEqual(witness.classify(host, status, headers, body), "unexpected-response")
 
     def test_network_failure_and_transient_outage_cannot_prove_stop(self):
@@ -43,6 +45,9 @@ class ExternalWitnessChecks(unittest.TestCase):
             if row["channel"] == "persistent" and row["classification"] == stopped:
                 row.update(reusedTCP=False, connectionNumber=2)
         self.assertFalse(witness.conclusion(reconnect)["externalTransitionObserved"])
+        stopped_only = witness.conclusion(rows([stopped] * 3))
+        self.assertTrue(stopped_only["externalStoppedStateObserved"])
+        self.assertFalse(stopped_only["externalTransitionObserved"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,11 @@ on:
         description: 外部観測の時間（30〜600秒）
         type: number
         default: 240
+      witness_phase:
+        description: 停止への遷移、または停止後の状態だけを外部確認する
+        type: choice
+        options: [transition, stopped]
+        default: transition
 
 permissions:
   contents: read
@@ -110,14 +115,21 @@ jobs:
       - name: 入力境界と停止の判定を検査
         run: python3 -m unittest discover -s tests -p test_external_witness.py
       - name: 外部から本人限定の認証入口を事前確認
+        if: inputs.witness_phase != 'stopped'
         env:
           WITNESS_URL: ${{ inputs.external_url }}
         run: python3 tests/external_witness.py --url "$WITNESS_URL" --baseline-only --output test-results/external-witness/preflight.json
       - name: 未認証の転送とCloudflare 1033を新規・継続接続で観測
+        if: inputs.witness_phase != 'stopped'
         env:
           WITNESS_URL: ${{ inputs.external_url }}
           WITNESS_SECONDS: ${{ inputs.witness_seconds }}
         run: python3 tests/external_witness.py --url "$WITNESS_URL" --seconds "$WITNESS_SECONDS" --output test-results/external-witness/report.json
+      - name: 停止後の状態を外部から再確認
+        if: inputs.witness_phase == 'stopped'
+        env:
+          WITNESS_URL: ${{ inputs.external_url }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --stopped-only --output test-results/external-witness/report.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
