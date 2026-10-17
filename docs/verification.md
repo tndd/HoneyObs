@@ -14,7 +14,13 @@
 
 初回の全体回帰では、背景化試験の開始前に通常ウィンドウを表示できない準備失敗と、子が解除済みのbuildアプリを親ゲートが二重解除する失敗を検出した。前者はread-onlyのOS状態で `CGSSessionScreenIsLocked=1`、前面が `com.apple.loginwindow` と確認した。固有Bundle IDへの変更や前面化APIでは解消せず、起動先の競合とは断定しない。ウィンドウの判定条件は緩和せず、解除後の再検証が必要である。後者は所有する各harnessの明示cleanupへ統一して重複解除を除いた。これらの初回失敗を合格に読み替えない。
 
-後続のQA統合点 `fe3093a` でも `bash tests/unit.sh` が合格し、導入復旧12件・QA境界11件を含めて確認した（`test-results/review26-final-unit.log`）。背景検査はread-onlyの開始前検査を追加し、ロック中の実機でApp/VMを起動せずexit 1、PASSなし、cases空を確認した（`test-results/app-background-20261017-050258-fe8d0a/report.json`）。解除後の背景化を含む全体ゲート再実行と、導入済み0.3.1の実利用経路は未回収であり、マージ・導入更新を保留する。
+後続のQA統合点 `fe3093a` でも `bash tests/unit.sh` が合格し、導入復旧12件・QA境界11件を含めて確認した（`test-results/review26-final-unit.log`）。背景検査はread-onlyの開始前検査を追加し、ロック中の実機でApp/VMを起動せずexit 1、PASSなし、cases空を確認した（`test-results/app-background-20261017-050258-fe8d0a/report.json`）。
+
+利用者のロック解除後、`d6621e9` を固定して `bash scripts/local_vm_gate.sh` がexit 0で全完走した（`test-results/review26-unlocked-full-gate.log`）。最小化・非表示はそれぞれ実native bounds/hidden状態とfreshness・HTTP・VZ回収を確認した（`test-results/app-background-20261017-091535-ff07ff/`）。実NSMenuの4.2秒保持は `test-results/menu-tracking-20261017-091604-f4c53a/`、UI/main停止による失効・既存接続終了・失効後の新規拒否は `test-results/permit-faults-20261017-091614/` に記録した。初回のロック中失敗を再解釈したものではなく、解除後の別実行である。
+
+0.3.1 build 5を `~/Applications/HoneyObs.app` へ更新し、`tests/installed_app.py` の完走・即中止・IP観測後中止の3経路が合格した（`test-results/installed-app-20261017-091653/`）。完走/中止画面も目視確認した。さらに `/tmp` から試験フラグなしで通常起動し、NSRunningApplication・Engine・ownerのPID一致、導入済みbundleと実行先、アイコン、repo非参照、重複起動の同じPID、通常Quitによる両job/IPC消滅、再起動後の待機/VMなしを確認した（`test-results/normal-installed-20261017-091814/`）。これでPR #26で保留していた実機受入2条件を回収した。
+
+別途、利用者から報告されたSpotlightの重複は、登録解除と別に開発/QAの `.app` 自体が索引に残る問題と確認した。生成bundleの配置・旧コピーの移行は後続の変更で扱い、登録解除失敗の偽PASSの修正だけを重複解消の証拠にしない。
 
 局所証拠：`test-results/review26-before/slow-persist.json`、`test-results/review26-bin/slow-persist.json`、`test-results/lifecycle-3B23D317-16A2-47EA-8492-AA46987635DD/`、`test-results/session-jobs-20261017-044514-0dd5d5/`、`test-results/menu-tracking-20261017-045213-d2b2be/`、`test-results/permit-faults-20261017-045223/`。修正前後の追加証拠は `test-results/review26-evidence/` に保存した。外部公開・実スリープ・一般配布の未回収ゲートは継続する。
 
