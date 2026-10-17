@@ -76,6 +76,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private let persistFinal: (Data,URL) throws -> Void
     private let testing: Bool
     private let probeTargets: String
+    private let allowedMail: String?
     var requiresSessionRecovery: Bool { stopFailed || (egress?.requiresSessionRecovery ?? false) }
     private var observations = ObservationStore()
     private var lastArchive = Data()
@@ -96,11 +97,12 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 "finalDrainPending":finalDrain != nil]
     }
 
-    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "", requireManagedArchive: Bool = false,
+    init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "", allowedMail: String? = nil, requireManagedArchive: Bool = false,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
          readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil,
          persistFinal: @escaping (Data,URL) throws -> Void = { data,url in try data.write(to:url,options:.atomic) }) throws {
         self.directory = directory; self.resources = resources; self.testing = testing; self.probeTargets = probeTargets
+        self.allowedMail = allowedMail
         self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
         self.readGuest = readGuest
         self.persistFinal = persistFinal
@@ -363,7 +365,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func startTunnel() {
         guard egress == nil, let permit, permit.valid else { fail("通信VMの転送許可がありません"); return }
         let current = generation
-        let communication = EgressVM(resources: resources, directory: directory, originPort: localPort, originHost: originHost, permit: permit) { [weak self] message in
+        let communication = EgressVM(resources: resources, directory: directory, originPort: localPort, originHost: originHost, permit: permit, allowedMail: allowedMail) { [weak self] message in
             guard let self else { return }
             if self.active { self.fail(message) } else { self.advanceStop() }
         }

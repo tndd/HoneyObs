@@ -36,10 +36,15 @@ def main():
     # CGO_ENABLED=0は通信VM launcherの権限境界の必須ビルド条件。
     subprocess.run(['go', 'build', '-trimpath', '-ldflags=-s -w', '-o', str(CACHE / 'egress-init'), '.'],
                    cwd=ROOT / 'egress', env=dict(os.environ, GOOS='linux', GOARCH='arm64', CGO_ENABLED='0'), check=True)
-    files = [(p, stat.S_IFDIR | 0o755, b'') for p in ['proc', 'sys', 'dev', 'tmp', 'modules']]
+    roots = subprocess.check_output(['security', 'find-certificate', '-a', '-p',
+                                     '/System/Library/Keychains/SystemRootCertificates.keychain'])
+    if b'-----BEGIN CERTIFICATE-----' not in roots:
+        raise RuntimeError('通信VMの公開root証明書を取得できません')
+    files = [(p, stat.S_IFDIR | 0o755, b'') for p in ['proc', 'sys', 'dev', 'tmp', 'modules', 'etc', 'etc/ssl', 'etc/ssl/certs']]
     files += [('init', stat.S_IFREG | 0o555, (CACHE / 'egress-init').read_bytes()),
               ('cloudflared', stat.S_IFREG | 0o555, binary.read_bytes()),
-              ('config.yml', stat.S_IFREG | 0o444, b'{}\n')]
+              ('config.yml', stat.S_IFREG | 0o444, b'{}\n'),
+              ('etc/ssl/certs/ca-certificates.crt', stat.S_IFREG | 0o444, roots)]
     with tarfile.open(kernel, 'r:gz', ignore_zeros=True) as archive:
         depname = next(n for n in archive.getnames() if n.endswith('/modules.dep'))
         prefix = depname.removesuffix('modules.dep')

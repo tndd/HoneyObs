@@ -2,10 +2,12 @@ import Foundation
 import Virtualization
 
 // 通信VMもNIC・ディスク・共有ディレクトリを持たない。ゲストからの接続は
-// 9000=固定origin、9001=空POSTを一度だけ、9002=固定Cloudflare edgeの3用途だけ。
+// 9000=固定origin、9001=固定POSTを一度だけ、9002=固定edge。
+// 本人限定の検証時だけ9003=固定認証ホストの公開鍵TLSを追加する。
 final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListenerDelegate {
     let resources: URL, directory: URL
     private let originPort: UInt16, originHost: String, permit: ForwardingPermit
+    private let allowedMail: String?
     private let onFailure: (String) -> Void
     private var machine: VZVirtualMachine?
     private var console: BoundedConsole?
@@ -42,18 +44,21 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
     private var testPending: [UUID: VZVirtioSocketConnection] = [:]
     #endif
 
-    init(resources: URL, directory: URL, originPort: UInt16, originHost: String, permit: ForwardingPermit, onFailure: @escaping (String) -> Void) {
+    init(resources: URL, directory: URL, originPort: UInt16, originHost: String, permit: ForwardingPermit, allowedMail: String? = nil, onFailure: @escaping (String) -> Void) {
         self.resources = resources; self.directory = directory; self.originPort = originPort; self.originHost = originHost
         self.permit = permit; self.onFailure = onFailure
+        self.allowedMail = allowedMail
     }
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
         guard canStart, originPort != 0, permit.valid else { completion(.failure(error("通信VMを開始できません"))); return }
+        guard allowedMail.map(EgressPolicy.validRecipient) ?? true else { completion(.failure(error("本人限定の認証先が不正です"))); return }
         active = true; acquiredURL = ""; failed = false; stopFailed = false; provisioned = false; edgeAttempts = []; lastHealthAt = 0; started = safetyTime(); startCallback = completion
         do {
             let config = VZVirtualMachineConfiguration(); config.cpuCount = 1; config.memorySize = 256 * 1024 * 1024
             let boot = VZLinuxBootLoader(kernelURL: resources.appendingPathComponent("vmlinuz"))
             boot.initialRamdiskURL = resources.appendingPathComponent("egress-initramfs.gz")
             boot.commandLine = "console=hvc0 rdinit=/init panic=0 quiet honeyobs.host=\(originHost)"
+            if let allowedMail { boot.commandLine += " honeyobs.allowedmail=" + Data(allowedMail.utf8).base64EncodedString() }
             config.bootLoader = boot; config.networkDevices = []; config.storageDevices = []; config.directorySharingDevices = []
             config.socketDevices = [VZVirtioSocketDeviceConfiguration()]; config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -64,7 +69,8 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
             config.serialPorts = [serial]; try config.validate()
             let vm = VZVirtualMachine(configuration: config); machine = vm; vm.delegate = self
             guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else { throw error("通信VMのvsockがありません") }
-            for port: UInt32 in [9000, 9001, 9002] {
+            let ports: [UInt32] = allowedMail == nil ? [9000, 9001, 9002] : [9000, 9001, 9002, 9003]
+            for port in ports {
                 let listener = VZVirtioSocketListener(); listener.delegate = self; listeners[port] = listener; device.setSocketListener(listener, forPort: port)
             }
             vm.start { [weak self] result in
@@ -85,7 +91,7 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
               let device = machine?.socketDevices.first as? VZVirtioSocketDevice, device === socketDevice,
               let port = listeners.first(where: { $0.value === listener })?.key else { return false }
         if port == 9001 { guard !provisioned else { return false }; provisioned = true }
-        if port == 9002 {
+        if port == 9002 || port == 9003 {
             let now = safetyTime(); edgeAttempts.removeAll { now - $0 >= 1 }
             guard edgeAttempts.count < 4 else { return false }; edgeAttempts.append(now)
         }
@@ -99,10 +105,10 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
         }
         #endif
         let id = UUID()
-        let host = port == 9000 ? "127.0.0.1" : port == 9001 ? EgressPolicy.provisioningAddress : EgressPolicy.edgeAddress
-        let targetPort: UInt16 = port == 9000 ? originPort : port == 9001 ? 443 : EgressPolicy.edgePort
-        let mode: EgressStream.Mode = port == 9000 ? .origin : port == 9001 ? .provision : .edge
-        let stream = EgressStream(guest: connection, host: host, port: targetPort, mode: mode, permit: permit) { [weak self] in
+        let host = port == 9000 ? "127.0.0.1" : port == 9002 ? EgressPolicy.edgeAddress : EgressPolicy.provisioningAddress
+        let targetPort: UInt16 = port == 9000 ? originPort : port == 9002 ? EgressPolicy.edgePort : 443
+        let mode: EgressStream.Mode = port == 9000 ? .origin : port == 9001 ? .provision : port == 9002 ? .edge : .authKeys
+        let stream = EgressStream(guest: connection, host: host, port: targetPort, mode: mode, permit: permit, protectedProvision: allowedMail != nil) { [weak self] in
             self?.streams.removeValue(forKey: id); self?.advanceStop()
         }
         streams[id] = stream; stream.start(); return true

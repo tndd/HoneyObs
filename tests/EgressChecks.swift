@@ -15,6 +15,23 @@ import Darwin
         return Data([22,3,1] + u16(handshake.count) + handshake)
     }
     static func policy() {
+        let otpBody = EgressPolicy.protectedProvisionBody
+        let otpHeader = Data("POST /tunnel HTTP/1.1\r\nHost: 127.0.0.1:7002\r\nContent-Type: application/json\r\nContent-Length: \(otpBody.count)\r\n\r\n".utf8)
+        let emptyHeader = Data("POST /tunnel HTTP/1.1\r\nHost: 127.0.0.1:7002\r\nContent-Length: 0\r\n\r\n".utf8)
+        check(EgressPolicy.allowsProvision(otpHeader + otpBody, protected: true), "OTP request allowed only in protected mode")
+        check(!EgressPolicy.allowsProvision(otpHeader + otpBody), "OTP cannot change public policy")
+        check(!EgressPolicy.allowsProvision(emptyHeader, protected: true), "protected mode denies empty-public downgrade")
+        check(!EgressPolicy.allowsProvision(otpHeader + Data(repeating:32,count:otpBody.count), protected:true), "protected mode denies changed body")
+        check(!EgressPolicy.allowsProvision(otpHeader + otpBody + otpBody, protected:true), "protected mode denies surplus body")
+        let duplicateLength = Data("POST /tunnel HTTP/1.1\r\nHost: 127.0.0.1:7002\r\nContent-Length: \(otpBody.count)\r\nContent-Length: \(otpBody.count)\r\n\r\n".utf8)
+        check(!EgressPolicy.allowsProvision(duplicateLength + otpBody, protected:true), "duplicate length denied")
+        check(EgressPolicy.provisioningRequest(protected:true).suffix(otpBody.count) == otpBody, "host reconstructs fixed OTP body")
+        check(EgressPolicy.provisioningRequest(protected:false).suffix(4) == Data([13,10,13,10]), "public body remains empty")
+        check(EgressPolicy.allowsEdgeHello(hello(name:EgressPolicy.authKeysServerName),authKeys:true), "fixed auth SNI")
+        check(!EgressPolicy.allowsEdgeHello(hello(name:EgressPolicy.authKeysServerName)), "auth SNI denied on edge channel")
+        check(!EgressPolicy.allowsEdgeHello(hello(),authKeys:true), "edge SNI denied on auth channel")
+        check(!EgressPolicy.allowsEdgeHello(hello(name:"login.trycloudflare.com.attacker.invalid"),authKeys:true), "foreign auth SNI denied")
+        check(EgressPolicy.validRecipient("owner+qa@example.com") && !EgressPolicy.validRecipient("owner@example.com\n"), "single exact recipient")
         let good = hello(); check(EgressPolicy.allowsEdgeHello(good), "valid SNI")
         check(!EgressPolicy.allowsEdgeHello(hello(name: "example.com")), "foreign SNI")
         check(!EgressPolicy.allowsEdgeHello(hello(name: "h2.cftunnel.com.attacker.invalid")), "suffix SNI")
@@ -49,7 +66,7 @@ import Darwin
         let deadline = Date().addingTimeInterval(seconds)
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     }
-    static func vm(root: URL) throws {
+    static func vm(root: URL, protected: Bool = false) throws {
         let directory = root.appendingPathComponent("test-results/egress-vm-\(getpid())")
         let permit = ForwardingPermit(confirmedAt:safetyTime())
         var renewal: Timer? = Timer.scheduledTimer(withTimeInterval:0.2,repeats:true){_ in _ = permit.renew(confirmedAt:safetyTime())}
@@ -68,7 +85,7 @@ import Darwin
         }
         fake.start(queue:.main); wait(until:{fakePort != 0},seconds:3); check(fakePort != 0,"fake edge listener")
         var failure = "", ready = false, apiRequests = 0, apiAllowed = false, edgeChannels = 0, badSNIDeniedBeforeAPI = false, pending: [UUID:EgressStream] = [:]
-        let subject = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,onFailure:{failure=$0})
+        let subject = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,allowedMail:protected ? "owner@example.com" : nil,onFailure:{failure=$0})
         subject.testHandler = {port,connection,finished in
             if port == 9002 {
                 edgeChannels += 1
@@ -76,13 +93,19 @@ import Darwin
                 pending[id]=stream;stream.start();return
             }
             if port == 9000 { connection.close();finished();return }
+            if port == 9003 { connection.close();finished();return } // このoffline試験では公開鍵も外へ取得しない。
             apiRequests += 1; badSNIDeniedBeforeAPI = captured == 0 && edgeChannels == 2
             DispatchQueue.global().async {
                 let fd = connection.fileDescriptor; _ = fcntl(fd,F_SETFL,fcntl(fd,F_GETFL) & ~O_NONBLOCK)
                 var timeout = timeval(tv_sec:2,tv_usec:0);setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,socklen_t(MemoryLayout<timeval>.size))
                 var bytes = Data(), byte: UInt8 = 0
                 while bytes.count < 4096 && !bytes.suffix(4).elementsEqual([13,10,13,10]) { if Darwin.read(fd,&byte,1) != 1 {break};bytes.append(byte) }
-                let allowed = EgressPolicy.allowsProvision(bytes)
+                if protected {
+                    for _ in 0..<EgressPolicy.protectedProvisionBody.count {
+                        if Darwin.read(fd,&byte,1) != 1 { break }; bytes.append(byte)
+                    }
+                }
+                let allowed = EgressPolicy.allowsProvision(bytes, protected:protected)
                 let body = Data("{\"success\":true,\"errors\":[],\"result\":{\"id\":\"00000000-0000-0000-0000-000000000001\",\"hostname\":\"local-test.trycloudflare.com\",\"account_tag\":\"local-test\",\"secret\":\"bG9jYWw=\"}}".utf8)
                 let response = Data("HTTP/1.1 200 OK\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)+body
                 response.withUnsafeBytes{_ = Darwin.write(fd,$0.baseAddress,$0.count)}
@@ -102,13 +125,14 @@ import Darwin
         check(stopped == true && subject.shutdownComplete,"VM and connectors shutdown: \(failure)")
         check(ready,"root health validates cloudflared: \(failure); \(log.suffix(1800))")
         check(apiRequests == 1 && apiAllowed,"real cloudflared fixed provisioning")
+        if protected { check(log.contains("protected quick Tunnel") && log.contains("One-Time PIN"), "real cloudflared enables recipient authentication") }
         check(captured > 0 && badSNIDeniedBeforeAPI && !foreignSNIReachedFake,"two foreign SNI attempts make zero fake-edge connections; one actual cloudflared SNI passes (channels \(edgeChannels), dials \(captured)): \(log.suffix(1200))")
         guard let line = log.components(separatedBy:"\n").first(where:{$0.contains("HONEYOBS_EGRESS_ISOLATION ")}),let range=line.range(of:"HONEYOBS_EGRESS_ISOLATION "),let data=String(line[range.upperBound...]).data(using:.utf8),let isolation=try? JSONSerialization.jsonObject(with:data) as? [String:Any] else{check(false,"VM isolation report missing: \(log.prefix(2000))");return}
         check(isolation["interfaces"] as? [String] == ["lo"],"no VM NIC")
         let probes = isolation["probes"] as? [String:String] ?? [:]
         check(!probes.isEmpty && !probes.values.contains("CONNECTED"),"LAN/internet/IPv6 not reached")
         for key in ["raw-ipv4","socket-domain-40","socket-domain-10","socket-domain-17"]{check(probes[key]?.contains("operation not permitted") == true,"seccomp denied \(key): \(probes[key] ?? "missing")")}
-        let report: [String:Any] = ["configuredMemoryMiB":256,"bootToFakeEdgeSeconds":bootSeconds,"apiRequests":apiRequests,"fakeEdgeConnections":captured,"health":snapshot,"isolation":isolation,"shutdownComplete":subject.shutdownComplete,"externalPublication":false]
+        let report: [String:Any] = ["configuredMemoryMiB":256,"bootToFakeEdgeSeconds":bootSeconds,"apiRequests":apiRequests,"fakeEdgeConnections":captured,"health":snapshot,"isolation":isolation,"shutdownComplete":subject.shutdownComplete,"externalPublication":false,"protectedProvision":protected]
         try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent("report.json"))
         let earlyPermit = ForwardingPermit(confirmedAt:safetyTime())
         let early = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory.appendingPathComponent("early-stop"),originPort:12345,originHost:"egress-early.invalid",permit:earlyPermit,onFailure:{_ in})
@@ -121,6 +145,6 @@ import Darwin
     }
     static func main() throws {
         policy()
-        if CommandLine.arguments.contains("--vm") {try vm(root:URL(fileURLWithPath:CommandLine.arguments[1]))}
+        if CommandLine.arguments.contains("--vm") {try vm(root:URL(fileURLWithPath:CommandLine.arguments[1]),protected:CommandLine.arguments.contains("--protected"))}
     }
 }

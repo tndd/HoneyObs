@@ -118,10 +118,17 @@ func forward(local net.Conn, port uint32) {
 	<-done
 }
 func bridge() {
-	for _, p := range []struct {
+	ports := []struct {
 		local  string
 		remote uint32
-	}{{"127.0.0.1:7000", 9000}, {"127.0.0.1:7002", 9001}, {"127.0.0.1:7844", 9002}} {
+	}{{"127.0.0.1:7000", 9000}, {"127.0.0.1:7002", 9001}, {"127.0.0.1:7844", 9002}}
+	if os.Getenv("ALLOWED_MAIL") != "" {
+		ports = append(ports, struct {
+			local  string
+			remote uint32
+		}{"127.0.0.1:7003", 9003})
+	}
+	for _, p := range ports {
 		l, e := net.Listen("tcp4", p.local)
 		if e != nil {
 			log.Fatal(e)
@@ -135,7 +142,14 @@ func bridge() {
 				}
 				select {
 				case slots <- struct{}{}:
-					go func() { defer func() { <-slots }(); forward(c, port) }()
+					go func() {
+						defer func() { <-slots }()
+						if port == 9003 {
+							authProxy(c)
+						} else {
+							forward(c, port)
+						}
+					}()
 				default:
 					c.Close()
 				}
@@ -227,8 +241,11 @@ func cloudflared() {
 	}
 	b, _ := json.Marshal(status())
 	fmt.Println("HONEYOBS_EGRESS_ISOLATION " + string(b))
-	args := []string{"cloudflared", "tunnel", "--config", "/config.yml", "--no-autoupdate", "--url", "http://127.0.0.1:7000", "--http-host-header", os.Getenv("ORIGIN_HOST"), "--protocol", "http2", "--edge", "127.0.0.1:7844", "--quick-service", "http://127.0.0.1:7002", "--ha-connections", "1", "--metrics", "127.0.0.1:0"}
-	if e := syscall.Exec("/cloudflared", args, []string{"HOME=/tmp", "GODEBUG=netdns=go"}); e != nil {
+	args, env, err := cloudflaredCommand(os.Getenv("ORIGIN_HOST"), os.Getenv("ALLOWED_MAIL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if e := syscall.Exec("/cloudflared", args, env); e != nil {
 		log.Fatalf("execve(/cloudflared): %v", e)
 	}
 }
@@ -292,12 +309,16 @@ func initVM() {
 	if origin == "" {
 		log.Fatal("origin missing")
 	}
+	recipient, err := privateRecipient(string(cmd))
+	if err != nil {
+		log.Fatal(err)
+	}
 	if e := syscall.Mount("rootfs", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); e != nil {
 		log.Fatal(e)
 	}
 	start := func(mode string, uid uint32) *exec.Cmd {
 		c := exec.Command("/init", mode)
-		c.Env = []string{"ORIGIN_HOST=" + origin}
+		c.Env = []string{"ORIGIN_HOST=" + origin, "ALLOWED_MAIL=" + recipient}
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid}}

@@ -12,11 +12,13 @@ extension VZVirtioSocketConnection: EgressGuestSocket {}
 
 // 1本のvsockと固定宛先TCPの所有。close完了はworkerとNWの終了後だけ通知する。
 final class EgressStream {
-    enum Mode { case origin, edge, provision }
+    enum Mode { case origin, edge, provision, authKeys }
     private let guest: EgressGuestSocket
     private let host: NWEndpoint.Host
     private let port: NWEndpoint.Port
     private let mode: Mode
+    private let protectedProvision: Bool
+    private let authKeysDeadline: Double
     private let permit: ForwardingPermit
     private let finished: () -> Void
     private let lock = NSLock()
@@ -28,9 +30,10 @@ final class EgressStream {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "honeyobs.egress.stream")
 
-    init(guest: EgressGuestSocket, host: String, port: UInt16, mode: Mode, permit: ForwardingPermit, finished: @escaping () -> Void) {
+    init(guest: EgressGuestSocket, host: String, port: UInt16, mode: Mode, permit: ForwardingPermit, protectedProvision: Bool = false, finished: @escaping () -> Void) {
         self.guest = guest; self.host = NWEndpoint.Host(host); self.port = NWEndpoint.Port(rawValue: port)!
         self.mode = mode; self.permit = permit; self.finished = finished
+        self.protectedProvision = protectedProvision; self.authKeysDeadline = safetyTime() + 10
     }
     private var live: Bool { lock.lock(); defer { lock.unlock() }; return !closed && permit.valid }
     func start() {
@@ -44,7 +47,7 @@ final class EgressStream {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSig, socklen_t(MemoryLayout<Int32>.size))
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
         t.schedule(deadline: .now(), repeating: .milliseconds(100)); t.setEventHandler { [weak self] in
-            guard let self, !self.permit.valid else { return }; self.cancel()
+            guard let self, !self.permit.valid || (self.mode == .authKeys && safetyTime() >= self.authKeysDeadline) else { return }; self.cancel()
         }; timer = t; t.resume()
         DispatchQueue.global(qos: .userInitiated).async { self.run() }
     }
@@ -95,8 +98,8 @@ final class EgressStream {
             lock.lock(); workerEnded = true; lock.unlock(); completeIfDone()
         }
         var first = Data()
-        if mode == .edge {
-            guard let hello = record(until: safetyTime() + 4), EgressPolicy.allowsEdgeHello(hello) else { return }
+        if mode == .edge || mode == .authKeys {
+            guard let hello = record(until: safetyTime() + 4), EgressPolicy.allowsEdgeHello(hello, authKeys: mode == .authKeys) else { return }
             first = hello
         }
         if mode == .provision {
@@ -105,8 +108,12 @@ final class EgressStream {
             while !header.suffix(4).elementsEqual([13,10,13,10]) {
                 guard header.count < 4096, let byte = exact(1, until: deadline) else { return }; header += byte
             }
-            guard EgressPolicy.allowsProvision(header) else { return }
-            first = Data("POST /tunnel HTTP/1.1\r\nHost: api.trycloudflare.com\r\nUser-Agent: cloudflared/2026.10.0\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+            let expected = protectedProvision ? EgressPolicy.protectedProvisionBody : Data()
+            guard EgressPolicy.allowsProvision(header + expected, protected: protectedProvision) else { return }
+            if !expected.isEmpty {
+                guard let body = exact(expected.count, until: deadline), body == expected else { return }
+            }
+            first = EgressPolicy.provisioningRequest(protected: protectedProvision)
         }
         guard live else { return }
         let parameters: NWParameters
@@ -148,7 +155,7 @@ final class EgressStream {
         }
         var compatibilityCCS = false
         while live {
-            if mode == .edge {
+            if mode == .edge || mode == .authKeys {
                 guard let bytes = record() else { return }
                 // TLS1.3の暗号化recordだけ継続。2個目の平文ClientHelloやTLS1.2再交渉は拒否。
                 guard EgressPolicy.allowsFollowingRecord(bytes, compatibilityCCSUsed: compatibilityCCS) else { return }
@@ -167,6 +174,10 @@ final class EgressStream {
         nw.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, done, error in
             guard let self, self.live else { return }
             if var data, !data.isEmpty {
+                if self.mode == .authKeys {
+                    self.responseBytes += data.count
+                    guard self.responseBytes <= 1_114_112 else { self.cancel(); return }
+                }
                 if self.mode == .provision {
                     self.responseBytes += data.count
                     if self.responseBytes > 65536 { self.cancel(); return }

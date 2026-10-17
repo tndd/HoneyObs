@@ -12,14 +12,22 @@ struct LaunchOptions {
     let dashboardSmoke: Bool
     let exerciseSmoke: Bool
     let probeTargets: String
+    let allowedMail: String?
 
     init(arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment,
          defaultDirectory: URL? = nil) throws {
         testing = arguments.contains("--test-mode")
-        let restricted = ["--headless", "--public", "--local-origin", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke"]
+        let restricted = ["--headless", "--public", "--local-origin", "--ui-smoke", "--ui-public-smoke", "--ui-dashboard-smoke", "--ui-exercise-smoke", "--allowed-mail"]
         guard testing || !restricted.contains(where: arguments.contains) else {
             throw Self.invalid("検証用フラグには --test-mode と私有の --run-directory が必要です")
         }
+        let mailIndices = arguments.indices.filter { arguments[$0] == "--allowed-mail" }
+        if let index = mailIndices.first {
+            guard mailIndices.count == 1, index + 1 < arguments.count, EgressPolicy.validRecipient(arguments[index + 1]) else {
+                throw Self.invalid("本人限定の認証先には単一のメールアドレスが必要です")
+            }
+            allowedMail = arguments[index + 1]
+        } else { allowedMail = nil }
         let indices = arguments.indices.filter { arguments[$0] == "--run-directory" }
         let internalSession = arguments.contains("--session-owner") || arguments.contains("--session-client")
         if testing || !indices.isEmpty {

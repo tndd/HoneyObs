@@ -13,6 +13,7 @@ import Foundation
         let normal = try LaunchOptions(arguments: ["HoneyObs"], environment: environment, defaultDirectory: root)
         precondition(!normal.testing && !normal.headless && !normal.dashboardSmoke && normal.probeTargets.isEmpty)
         rejected(["HoneyObs", "--headless"])
+        rejected(["HoneyObs", "--allowed-mail", "owner@example.com"])
         rejected(["HoneyObs", "--ui-exercise-smoke", "--run-directory", root.path])
         rejected(["HoneyObs", "--run-directory", root.path])
         rejected(["HoneyObs", "--test-mode"])
@@ -22,6 +23,15 @@ import Foundation
         let options = try LaunchOptions(arguments: ["HoneyObs", "--test-mode", "--ui-exercise-smoke", "--run-directory", run.path], environment: environment)
         precondition(options.testing && options.dashboardSmoke && options.exerciseSmoke && !options.headless)
         precondition(options.probeTargets == "127.0.0.1:1234")
+        precondition(options.allowedMail == nil && normal.allowedMail == nil)
+        let privateBase = ["HoneyObs", "--test-mode", "--run-directory", run.path]
+        let privateOptions = try LaunchOptions(arguments: privateBase + ["--allowed-mail", "owner+qa@example.com"])
+        precondition(privateOptions.allowedMail == "owner+qa@example.com")
+        rejected(privateBase + ["--allowed-mail"])
+        rejected(privateBase + ["--allowed-mail", "owner@example.com", "--allowed-mail", "owner@example.com"])
+        for invalid in ["", "*", "*@example.com", "one@example.com,two@example.com", "owner@example.com\n", "a@localhost", "a@-example.com"] {
+            rejected(privateBase + ["--allowed-mail", invalid])
+        }
         let client = try LaunchOptions(arguments: ["HoneyObs", "--session-client", "--run-directory", run.path], environment: environment)
         precondition(!client.testing && !client.dashboardSmoke && client.probeTargets.isEmpty)
         let shared = root.appendingPathComponent("shared")

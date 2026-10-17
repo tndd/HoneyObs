@@ -8,12 +8,21 @@ enum EgressPolicy {
     static let edgeAddress = "198.41.192.7"
     static let edgePort: UInt16 = 7844
     static let edgeServerName = "h2.cftunnel.com"
+    static let authKeysServerName = "login.trycloudflare.com"
+    static let protectedProvisionBody = Data(#"{"auth_mode":"otp"}"#.utf8)
     static let provisioningURL = URL(string: "https://api.trycloudflare.com/tunnel")!
     static let maximumHello = 16384
 
-    // 許可した要求そのものは外へ転送せず、ホストが固定の空POSTを再構成する。
-    static func allowsProvision(_ data: Data) -> Bool {
-        guard data.count <= 4096, let text = String(data: data, encoding: .utf8), text.hasSuffix("\r\n\r\n") else { return false }
+    static func validRecipient(_ value: String) -> Bool {
+        value.utf8.count <= 254 && value.utf8.allSatisfy { $0 > 32 && $0 < 127 } && value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}@[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)+$"#, options: .regularExpression) != nil
+    }
+
+    // 要求内容を外へ透過転送せず、ホストが選んだ認証モードの固定POSTを再構成する。
+    static func allowsProvision(_ data: Data, protected: Bool = false) -> Bool {
+        let body = protected ? protectedProvisionBody : Data()
+        guard data.count <= 4096, let end = data.range(of: Data([13,10,13,10])),
+              data.suffix(from:end.upperBound) == body,
+              let text = String(data: data.prefix(end.upperBound), encoding: .utf8) else { return false }
         let lines = text.components(separatedBy: "\r\n")
         guard lines.first == "POST /tunnel HTTP/1.1" else { return false }
         var lengths = 0, hosts = 0
@@ -22,12 +31,17 @@ enum EgressPolicy {
             let key = line[..<colon].lowercased(), value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             switch key {
             case "host": hosts += 1; if value != "127.0.0.1:7002" { return false }
-            case "content-length": lengths += 1; if value != "0" { return false }
+            case "content-length": lengths += 1; if value != String(body.count) { return false }
             case "user-agent", "content-type", "accept-encoding", "connection": break
             default: return false
             }
         }
-        return hosts == 1 && lengths <= 1
+        return hosts == 1 && (protected ? lengths == 1 : lengths <= 1)
+    }
+
+    static func provisioningRequest(protected: Bool) -> Data {
+        let body = protected ? protectedProvisionBody : Data()
+        return Data("POST /tunnel HTTP/1.1\r\nHost: api.trycloudflare.com\r\nUser-Agent: cloudflared/2026.10.0\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body
     }
 
     static func allowsProvisionResponseHeader(_ data: Data) -> Bool {
@@ -57,7 +71,7 @@ enum EgressPolicy {
 
     // 完全な単一recordのClientHelloを解析。fragment/ECH/早期データを許可しない。
     // 暗号化後のCloudflareプロトコルやテナントの正当性はこの検査の保証外。
-    static func allowsEdgeHello(_ record: Data) -> Bool {
+    static func allowsEdgeHello(_ record: Data, authKeys: Bool = false) -> Bool {
         let b = Array(record)
         func u16(_ i: Int) -> Int { Int(b[i]) << 8 | Int(b[i + 1]) }
         guard b.count >= 9, b.count <= maximumHello, b[0] == 22, b[1] == 3, b[2] >= 1, b[2] <= 3,
@@ -95,10 +109,10 @@ enum EgressPolicy {
                     guard length > 0, i + length <= end, let proto = String(bytes: b[i..<i + length], encoding: .ascii) else { return false }
                     protocols.append(proto); i += length
                 }
-                guard protocols == ["h2"] else { return false }
+                guard protocols == ["h2"] || (authKeys && (protocols == ["h2", "http/1.1"] || protocols == ["http/1.1"])) else { return false }
             }
             i = end
         }
-        return names == [edgeServerName]
+        return names == [authKeys ? authKeysServerName : edgeServerName]
     }
 }
