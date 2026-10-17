@@ -19,6 +19,13 @@ final class ForwardingPermit {
         lock.lock(); defer { lock.unlock() }
         if clock() >= until { revoked = true }; return !revoked
     }
+    // 短い非同期I/Oの発行だけを行う。actionからこの許可へ再入しない。
+    func ifValid(_ action: () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if clock() >= until { revoked = true }
+        guard !revoked else { return false }
+        action(); return true
+    }
     var deadline: Double { lock.lock(); defer { lock.unlock() }; return until }
     func renew(confirmedAt: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }

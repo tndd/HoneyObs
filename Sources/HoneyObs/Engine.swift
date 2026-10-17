@@ -73,6 +73,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private let healthLimit: TimeInterval
     private let stopMachine: (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void
     private let readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)?
+    private let persistFinal: (Data,URL) throws -> Void
     private let testing: Bool
     private let probeTargets: String
     var requiresSessionRecovery: Bool { stopFailed || (egress?.requiresSessionRecovery ?? false) }
@@ -91,15 +92,18 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     var testingSnapshot: [String:Any] {
         guard testing else { return [:] }
         return ["safetyNow":safetyTime(),"guestConfirmedAt":guestConfirmed,"uiConfirmedAt":uiConfirmed,
-                "permitDeadline":permit?.deadline ?? 0,"permitValid":permit?.valid ?? false]
+                "permitDeadline":permit?.deadline ?? 0,"permitValid":permit?.valid ?? false,
+                "finalDrainPending":finalDrain != nil]
     }
 
     init(directory: URL, resources: URL, stopLimit: TimeInterval = 8, healthLimit: TimeInterval = 5, testing: Bool = false, probeTargets: String = "", requireManagedArchive: Bool = false,
          stopMachine: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
-         readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil) throws {
+         readGuest: ((VZVirtualMachine, @escaping (Result<Data, Error>) -> Void) -> Void)? = nil,
+         persistFinal: @escaping (Data,URL) throws -> Void = { data,url in try data.write(to:url,options:.atomic) }) throws {
         self.directory = directory; self.resources = resources; self.testing = testing; self.probeTargets = probeTargets
         self.stopLimit = stopLimit; self.healthLimit = healthLimit; self.stopMachine = stopMachine
         self.readGuest = readGuest
+        self.persistFinal = persistFinal
         super.init()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         if requireManagedArchive {
@@ -213,7 +217,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
                 case .failure(let error): self.fail(error.localizedDescription)
                 case .success:
                     self.phase = "VM準備中"; self.update()
-                    self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+                    let health = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+                    self.timer = health; RunLoop.main.add(health, forMode: .common)
                     self.tick()
                 }
             }
@@ -287,7 +292,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         let permission = ForwardingPermit(confirmedAt: confirmed)
         guard permission.valid else { fail("画面またはVMの応答が古いため転送を開始しません"); return }
         permit = permission
-        permitTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.maintainPermit() }
+        let renewal = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.maintainPermit() }
+        permitTimer = renewal; RunLoop.main.add(renewal, forMode: .common)
         do {
             let parameters = NWParameters.tcp
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -386,6 +392,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
 
     func stop(reason: String, completion: ((Bool) -> Void)? = nil) {
         if shutdownComplete { completion?(true); return }
+        // 回収期限後もOSの保存I/Oは残り得る。旧書込の回収前に停止再試行から再開を許さない。
+        if stopFailed, finalDrain != nil { completion?(false); return }
         if let completion { stopCallbacks.append(completion) }
         guard !stopping else { return }
         active = false; generation = UUID(); phase = "停止処理中"; detail = reason
@@ -397,7 +405,8 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
         for client in pending.values { cancelClient(client) }
         for relay in sessions.values { relay.cancel() }
         for read in guestReads.values { read.cancel() }
-        stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        let stoppingTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        stopTimer = stoppingTimer; RunLoop.main.add(stoppingTimer, forMode: .common)
         update(); advanceStop()
     }
 
@@ -443,7 +452,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             }
         }
         if machine == nil { closeConsole() }
-        if stopVMsStarted, machine == nil, console == nil, guestReads.isEmpty, egress == nil, listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty {
+        if stopVMsStarted, finalDrain == nil, machine == nil, console == nil, guestReads.isEmpty, egress == nil, listener == nil, sessions.isEmpty, pending.isEmpty, cancellingClients.isEmpty {
             finishStop(error: nil)
         } else if ProcessInfo.processInfo.systemUptime - stopStarted >= stopLimit {
             finishStop(error: "停止期限を超えました。終了未確認のため再開できません")
@@ -458,20 +467,27 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
             saveFinalObservation(); completion(); return
         }
         let attempt = stopAttempt
-        let drain = ObservationDrain(store:observations,budget:min(0.5,stopLimit/4),request:{ [weak self] path,reply in
-            guard let self else { return {} }
+        // workerからEngineの状態を触らず、保存先とarchive lockだけを保持する。
+        let archive = archiveSession, target = directory.appendingPathComponent("events.json"), persist = persistFinal
+        let drain = ObservationDrain(store:observations,budget:min(0.5,stopLimit/4),request:{ [weak self, weak vm] path,reply in
+            guard let self, let vm else {
+                reply(.failure(NSError(domain:"HoneyObs.ObservationDrain",code:2,userInfo:[NSLocalizedDescriptionKey:"模擬VMは回収済みです"]))); return {}
+            }
             let id = self.requestGuest(vm,path:path,completion:reply)
             return { [weak self] in self?.guestReads[id]?.cancel() }
-        },persist:{ [weak self] data in
-            guard let self else { return }
-            try self.archiveSession?.checkWrite(bytes:data.count,name:"events.json")
-            try data.write(to:self.directory.appendingPathComponent("events.json"),options:.atomic)
-            self.lastArchive = data
+        },persist:{ data in
+            try archive?.checkWrite(bytes:data.count,name:"events.json")
+            try persist(data,target)
         },completed:{ [weak self] receipt in
             guard let self, self.stopAttempt == attempt else { return }
-            self.finalDrain = nil; self.finalObservation = receipt
-            self.events = Array(self.observations.events.suffix(128)); self.saveFinalObservation()
+            self.finalObservation = receipt
+            self.events = Array(self.observations.events.suffix(128))
+            // 期限通知でVM停止を先に始める。保存中はsettledまで再開・停止完了を認めない。
             if self.stopping { completion() }
+            self.saveFinalObservation()
+        },settled:{ [weak self] in
+            guard let self, self.stopAttempt == attempt else { return }
+            self.finalDrain = nil; self.advanceStop()
         })
         finalDrain = drain; drain.start()
     }
@@ -487,7 +503,7 @@ final class Engine: NSObject, VZVirtualMachineDelegate {
     private func finishStop(error: String?) {
         guard stopping else { return }
         stopTimer?.invalidate(); stopTimer = nil; stopping = false
-        finalDrain?.cancel(); finalDrain = nil
+        finalDrain?.cancel()
         stopFailed = error != nil
         if let error { phase = "停止失敗"; detail = error }
         else { phase = runError == nil ? "停止完了" : "エラー"; if let runError { detail = runError } }

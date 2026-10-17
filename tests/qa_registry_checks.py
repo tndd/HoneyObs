@@ -2,9 +2,11 @@
 """Launch Servicesは変更せず、解除対象の所有範囲と呼出位置を検査する。"""
 import contextlib
 import io
+import json
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -77,11 +79,130 @@ class QARegistryChecks(unittest.TestCase):
             self.assertFalse(qa_registry.unregister_app(app))
         self.assertIn('登録解除に失敗', output.getvalue())
 
+    def test_only_failed_target_is_retained_for_exit_fallback(self):
+        build = self.app(self.root / 'build/HoneyObs.app')
+        private = self.app(self.root / 'test-results/private/HoneyObs.app')
+        for app in [build, private]:
+            qa_registry.register_app(app)
+        self.run.side_effect = [subprocess.CompletedProcess([], 0, '', ''),
+                                subprocess.CompletedProcess([], 7, '', 'fixture failure'),
+                                subprocess.CompletedProcess([], 0, '', '')]
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(RuntimeError):
+            qa_registry.require_cleanup()
+        self.assertEqual(qa_registry._registered, {private})
+        self.assertTrue(qa_registry.cleanup())
+        self.assertEqual([call.args[0][-1] for call in self.run.call_args_list], [str(build), str(private), str(private)])
+
     def test_gate_missing_build_does_not_scan_and_missing_outside_is_refused(self):
         self.assertEqual(qa_registry.main([str(self.root / 'build/HoneyObs.app')]), 0)
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(qa_registry.main([str(self.root.parent / 'other/build/HoneyObs.app')]), 1)
         self.run.assert_not_called()
+
+
+class QARegistryOutcomeChecks(unittest.TestCase):
+    def run_integration(self, mode):
+        directory = tempfile.TemporaryDirectory(prefix='HoneyObs-registry-outcome-')
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name).resolve() / 'repo'
+        app = root / 'build/HoneyObs.app'
+        (app / 'Contents').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleIdentifier':'local.honeyobs.spike', 'CFBundleExecutable':'HoneyObs'}))
+        fake = root / 'fixture-lsregister'
+        fake.write_text('#!' + sys.executable + '\n' + '''
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+assert (root / 'resources-cleaned').read_text() == 'done'
+assert sys.argv[1:] == ['-u', str(root / 'build/HoneyObs.app')]
+calls = root / 'registry-calls.jsonl'
+with calls.open('a') as output:
+    output.write(json.dumps(sys.argv[1:]) + '\\n')
+count = len(calls.read_text().splitlines())
+report = root / 'test-results/integration/report.json'
+if count == 1:
+    assert not report.exists(), 'success/failure report was written before explicit cleanup'
+elif report.exists():
+    assert 'failure' in json.loads(report.read_text()), 'fallback observed a success report'
+mode = (root / 'mode').read_text()
+if mode == 'failure' or (mode == 'failure-once' and count == 1):
+    print('fixture registration failure', file=sys.stderr)
+    raise SystemExit(7)
+''')
+        fake.chmod(0o755)
+        (root / 'mode').write_text(mode)
+        script = '''
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import qa_registry, integration
+root = pathlib.Path(sys.argv[2])
+qa_registry.ROOT = root
+qa_registry.LSREGISTER = str(root / 'fixture-lsregister')
+integration.OUT = root / 'test-results/integration'
+def local_test():
+    qa_registry.register_app(root / 'build/HoneyObs.app')
+    try:
+        return {'matched': True}
+    finally:
+        (root / 'resources-cleaned').write_text('done')
+integration.local_test = local_test
+sys.argv = ['integration.py', '--local']
+integration.main()
+'''
+        result = subprocess.run([sys.executable, '-c', script, str(qa_registry.ROOT / 'tests'), str(root)],
+                                capture_output=True, text=True, timeout=10)
+        report = json.loads((root / 'test-results/integration/report.json').read_text())
+        calls = [json.loads(line) for line in (root / 'registry-calls.jsonl').read_text().splitlines()]
+        return result, report, calls
+
+    def test_explicit_unregister_failure_cannot_pass_gate_or_report_success(self):
+        result, report, calls = self.run_integration('failure')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('PASS', result.stdout)
+        self.assertIn('QAアプリの登録解除を確認できません', report['failure'])
+        self.assertEqual(len(calls), 2)  # 明示失敗と、終了時だけのfallback。
+
+    def test_fallback_success_does_not_reverse_explicit_failure(self):
+        result, report, calls = self.run_integration('failure-once')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('PASS', result.stdout)
+        self.assertIn('failure', report)
+        self.assertEqual(len(calls), 2)
+
+    def test_success_unregisters_once_before_success_report_and_output(self):
+        result, report, calls = self.run_integration('success')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        self.assertIn('PASS', result.stdout)
+        self.assertNotIn('failure', report)
+        self.assertEqual(len(calls), 1)  # 明示成功後のatexitでは再実行しない。
+
+
+class BackgroundSessionPreflightChecks(unittest.TestCase):
+    def test_unlocked_console_keeps_existing_ui_gate(self):
+        from app_background import session_blocker
+        self.assertIsNone(session_blocker({'available':True, 'locked':False, 'onConsole':True}))
+        self.assertIsNotNone(session_blocker({'available':False}))
+        self.assertIsNotNone(session_blocker({'available':True, 'locked':False, 'onConsole':False}))
+
+    def test_locked_session_records_blocker_without_launch_or_pass(self):
+        import app_background
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result'
+            report = {'cases':{}}
+            stdout = io.StringIO()
+            with patch.object(app_background, 'OUT', output), patch.object(app_background, 'REPORT', report), \
+                 patch.object(app_background, 'session_state', return_value={'available':True, 'locked':True, 'onConsole':True}), \
+                 patch.object(app_background.subprocess, 'Popen') as launch, \
+                 patch.object(sys, 'argv', ['app_background.py']), contextlib.redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as caught:
+                    app_background.main()
+                self.assertIn('BLOCKED', str(caught.exception))
+                launch.assert_not_called()
+            saved = json.loads((output / 'report.json').read_text())
+            self.assertIn('ロック中', saved['blocked'])
+            self.assertEqual(saved['cases'], {})
+            self.assertNotIn('PASS', stdout.getvalue())
 
 
 if __name__ == '__main__':

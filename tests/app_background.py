@@ -14,13 +14,37 @@ import socket
 import subprocess
 import time
 import uuid
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
 EXE = APP / 'Contents/MacOS/HoneyObs'
 OUT = ROOT / 'test-results' / ('app-background-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
 REPORT = {'app': str(APP), 'publicTunnel': False, 'extraJavaScriptEvaluation': False, 'cases': {}}
+
+
+def session_state():
+    script = '''
+import CoreGraphics
+import Foundation
+let session = CGSessionCopyCurrentDictionary() as? [String:Any]
+let state:[String:Any] = ["available":session != nil,
+    "locked":session?["CGSSessionScreenIsLocked"] as? Bool ?? false,
+    "onConsole":session?["kCGSSessionOnConsoleKey"] as? Bool ?? false]
+print(String(data:try JSONSerialization.data(withJSONObject:state),encoding:.utf8)!)
+'''
+    result = subprocess.run(['swift', '-e', script], check=True, capture_output=True, text=True, timeout=15)
+    return json.loads(result.stdout)
+
+
+def session_blocker(state):
+    if not state.get('available'):
+        return 'Macのユーザーセッション状態を確認できません'
+    if state.get('locked'):
+        return 'Macの画面がロック中です。解除後に同じ背景検査を再実行してください'
+    if not state.get('onConsole'):
+        return 'Macのコンソールユーザーセッションではありません'
+    return None
 
 
 def read(path):
@@ -121,9 +145,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case', choices=['all', 'minimize', 'hide'], default='all')
     args = parser.parse_args()
+    OUT.mkdir(mode=0o700, parents=True)
+    try:
+        REPORT['sessionPreflight'] = session_state()
+        blocked = session_blocker(REPORT['sessionPreflight'])
+    except Exception as error:
+        blocked = 'Macのユーザーセッション状態を取得できません: ' + str(error)
+    if blocked:
+        REPORT['blocked'] = blocked
+        (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
+        raise SystemExit('BLOCKED: ' + blocked)
     assert APP != (Path.home() / 'Applications/HoneyObs.app').resolve(), '検証は作業tree内のアプリを指定してください'
     assert EXE.is_file()
-    OUT.mkdir(mode=0o700, parents=True)
     for action, restore, property_name in [('minimize', 'restore', 'windowMiniaturized'), ('hide', 'show', 'appHidden')]:
         if args.case != 'all' and action != args.case:
             continue
@@ -218,7 +251,6 @@ def main():
                 wrapper.wait(timeout=15)
                 assert wrapper.returncode == 0, wrapper.returncode
                 wait(lambda: all(not process(owner[key]) for key in ['ownerPID', 'clientPID']))
-                print(action + ': PASS', flush=True)
             except BaseException as error:
                 REPORT['cases'][action] = {'failed': repr(error), 'stateBeforeCleanup': read(run / 'state.json'),
                                           'nativeBeforeCleanup': read(run / 'background-state.json'), 'witness': witness}
@@ -233,7 +265,10 @@ def main():
                         wrapper.wait(timeout=15)
                     except subprocess.TimeoutExpired:
                         wrapper.kill(); wrapper.wait()
+    require_cleanup()
     (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
+    for action in REPORT['cases']:
+        print(action + ': PASS', flush=True)
     print('自アプリの背景化・freshness・停止後VZ回収: PASS', OUT)
 
 

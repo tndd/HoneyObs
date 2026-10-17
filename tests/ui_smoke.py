@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import time
 from integration import APP, ROOT, read, wait, alive, curl, bootout_owned
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 
 def main():
@@ -34,12 +34,14 @@ def main():
                     assert body != b'Not found\n'
                     result['publicStatusAfterQuit'] = status
                 result[name] = 'PASS'
-                print('ネイティブUI ' + name + ': PASS', flush=True)
             finally:
                 if process.poll() is None:
                     process.kill(); process.wait()
                 bootout_owned(directory)
+    require_cleanup()
     (base / 'report.json').write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    for name in ['local', 'public-quit']:
+        print('ネイティブUI ' + name + ': PASS', flush=True)
     print('画面と記録:', base)
 
 

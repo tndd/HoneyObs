@@ -73,7 +73,8 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
                 switch result {
                 case .failure(let error): self.fail(error.localizedDescription)
                 case .success:
-                    self.healthTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.checkHealth() }
+                    let health = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.checkHealth() }
+                    self.healthTimer = health; RunLoop.main.add(health, forMode: .common)
                     self.checkHealth()
                 }
             }
@@ -156,7 +157,8 @@ final class EgressVM: NSObject, VZVirtualMachineDelegate, VZVirtioSocketListener
         #if EGRESS_TESTING
         for connection in testPending.values { Darwin.shutdown(connection.fileDescriptor, SHUT_RDWR) }
         #endif
-        stopTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        let stoppingTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.advanceStop() }
+        stopTimer = stoppingTimer; RunLoop.main.add(stoppingTimer, forMode: .common)
         advanceStop()
     }
     private func advanceStop() {

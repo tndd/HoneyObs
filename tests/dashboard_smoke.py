@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 from integration import APP, ROOT, read, wait, alive, curl, xpc_helpers, bootout_owned
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 
 def main():
@@ -71,15 +71,16 @@ def main():
             report = {'nativeWebKit': 'PASS', 'publicRequestToMap': 'PASS', 'selectionDisplayed': 'PASS',
                       'minimumWindow': 'PASS', 'stopKeepsHistory': 'PASS', 'restartClearsSession': 'PASS',
                       'tunnelClosed': 'PASS', 'actualSleep': 'ユーザー指定により未実施'}
-            print('実Mac GUI・公開受信→地図・停止・再開: PASS', flush=True)
         finally:
             if process.poll() is None:
                 process.terminate()
                 try: process.wait(timeout=8)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
             bootout_owned(directory)
+            require_cleanup()
             (directory / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print('画面と記録:', directory)
+    print('実Mac GUI・公開受信→地図・停止・再開: PASS', flush=True)
 
 
 if __name__ == '__main__':

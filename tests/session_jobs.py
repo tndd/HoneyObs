@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """GUI/VMを作らず、製品の2job所有と相互回収を実launchdで検査する。"""
 import json
+import fcntl
 import os
 from pathlib import Path
 import plistlib
@@ -66,9 +67,16 @@ for sources, target in [(['Sources/HoneyObs/SessionOwnership.swift', 'tests/Sess
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True, capture_output=True)
 subprocess.run(['codesign', '--force', '--sign', '-', str(APP)], check=True, capture_output=True)
 
-for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke', 'finish-delayed-ack', 'finish-no-ack']:
+archive_probe = OUT / 'archive-probe'
+subprocess.run(['swiftc', '-swift-version', '5', 'Sources/HoneyObs/SessionArchive.swift', 'tests/SessionArchiveRecoveryChecks.swift',
+                '-o', str(archive_probe)], cwd=ROOT, check=True)
+
+for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-stop', 'cross-revoke', 'finish-delayed-ack', 'finish-no-ack', 'retention-recovery']:
     run = OUT / fault
     run.mkdir(mode=0o700)
+    if fault == 'retention-recovery':
+        # Foundation.DateのJSONは2001-01-01起点。UI保存lockを持たないfixtureでmonitorだけを検証する。
+        (run / 'session-owner.json').write_text(json.dumps({'schema': 1, 'created': time.time() - 978307200 - 7200, 'closed': True}))
     owner = {}
     with (run / 'launcher.log').open('w') as log:
         wrapper = subprocess.Popen([str(EXE), '--test-mode', '--run-directory', str(run)], stdout=log, stderr=log)
@@ -79,7 +87,7 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
             start = time.monotonic()
             if fault == 'normal':
                 (run / 'fixture-quit').touch()
-            elif fault in ['finish-delayed-ack', 'finish-no-ack']:
+            elif fault in ['finish-delayed-ack', 'finish-no-ack', 'retention-recovery']:
                 monitor = owner['ownerPID']
                 current = command('/bin/ps', '-p', str(monitor), '-o', 'command=').stdout.strip()
                 assert current.startswith(str(HELPER) + ' '), current
@@ -93,6 +101,18 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
                 else:
                     wait(lambda: (run / 'finish-result.json').exists(), 1.5)
                     assert read(run / 'finish-result.json').get('acknowledged') is False
+                    if fault == 'retention-recovery':
+                        wait(lambda: not alive(owner['clientPID']))
+                        with (run / '.recovery.lock').open('r+') as protection:
+                            try:
+                                fcntl.flock(protection, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                pass
+                            else:
+                                raise AssertionError('monitor結果保存前に回収lockを解放しています')
+                        probe = command(str(archive_probe), '--probe', str(OUT))
+                        assert probe.returncode == 0 and run.exists(), probe.stdout + probe.stderr
+                        assert not (run / 'session-result.json').exists(), '遅いmonitor結果保存の条件を失っています'
                 os.kill(monitor, signal.SIGCONT)
             elif fault == 'cross-revoke':
                 (run / 'fixture-revoke').touch()
@@ -105,6 +125,9 @@ for fault in ['normal', 'client-kill', 'client-stop', 'monitor-kill', 'monitor-s
                 os.kill(owner[key], signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
             wait(lambda: gone(owner), 10)
             REPORT['cases'][fault] = {'allGoneWithin': round(time.monotonic() - start, 3), 'beforeTestCleanup': True}
+            if fault == 'retention-recovery':
+                assert read(run / 'session-result.json').get('status') == 1
+                REPORT['cases'][fault]['lateReceiptPersistedAfterClientDeath'] = True
             wrapper.wait(timeout=5)
             assert wrapper.returncode == (0 if fault in ['normal', 'finish-delayed-ack'] else 1), wrapper.returncode
             if fault in ['normal', 'finish-delayed-ack']:

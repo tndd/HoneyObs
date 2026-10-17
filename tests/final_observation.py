@@ -12,7 +12,7 @@ import socket
 import subprocess
 import time
 import uuid
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -206,9 +206,13 @@ def main():
             report['helpersGoneAfterCleanup'] = True
         except Exception as error:
             report['cleanupError'] = str(error); report['success'] = False
+        try:
+            require_cleanup()
+        except Exception as error:
+            report['registryCleanupError'] = str(error); report['success'] = False
         log.close(); (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     if not report['success']:
-        raise SystemExit(f"FAIL: {report.get('error', report.get('cleanupError'))}; {output / 'report.json'}")
+        raise SystemExit(f"FAIL: {report.get('error', report.get('cleanupError', report.get('registryCleanupError')))}; {output / 'report.json'}")
     print(f"PASS: 末尾{options.tail_count}件・未完了Relay・全観測ページ・最終フェンス・保存・実VZ/FD回収; {output / 'report.json'}")
 
 

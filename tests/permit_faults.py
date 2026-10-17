@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from integration import xpc_helpers, bootout_owned, alive
-from qa_registry import register_app
+from qa_registry import register_app, require_cleanup
 
 root = pathlib.Path(__file__).resolve().parent.parent
 out = root / 'test-results' / ('permit-faults-' + time.strftime('%Y%m%d-%H%M%S'))
@@ -149,14 +149,13 @@ for fault in ['freeze-main', 'freeze-ui']:
                                       'actualVZHelpersGoneBeforeCleanup': True, 'bothJobsGoneBeforeCleanup': True,
                                       'freshBaseline': baseline, 'noResurrectionObservedUntil': round(time.monotonic() - started, 3),
                                       'state': final}
-            print(fault + ': PASS', flush=True)
         except BaseException as error:
             summary['cases'][fault] = {'failed': repr(error), 'owner': owner, 'state': read(run / 'state.json'),
                                       'native': read(run / 'background-state.json'), 'newAfterExpiry': late,
                                       'helpersBeforeCleanup': {str(pid): alive(pid) for pid in helpers}}
+            (out / 'report.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2))
             raise
         finally:
-            (out / 'report.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2))
             if thread:
                 thread.join(timeout=2)
             if connection:
@@ -169,5 +168,8 @@ for fault in ['freeze-main', 'freeze-ui']:
                 except subprocess.TimeoutExpired:
                     bootout_owned(run); process.terminate(); process.wait(timeout=5)
             bootout_owned(run)
+require_cleanup()
 (out / 'report.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+for fault in summary['cases']:
+    print(fault + ': PASS', flush=True)
 print('実GUI/VMの期限失効・既存接続終了・失効後の新規要求拒否: PASS', out)

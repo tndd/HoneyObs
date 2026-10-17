@@ -14,6 +14,7 @@ final class SessionArchive {
         var schema = 1
         var created: Date
         var closed = false
+        var interruptedAt: Date?
     }
     private var fd: Int32 = -1
     let directory: URL
@@ -36,14 +37,24 @@ final class SessionArchive {
         for url in try fm.contentsOfDirectory(at:root,includingPropertiesForKeys:nil) {
             guard (try? isPrivateDirectory(url)) == true,
                   let data = try? Data(contentsOf:url.appendingPathComponent(markerName)),
-                  let marker = try? JSONDecoder().decode(Marker.self,from:data), marker.schema == 1 else { continue }
-            let probe = Darwin.open(url.appendingPathComponent(".session.lock").path,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0o600)
+                  var marker = try? JSONDecoder().decode(Marker.self,from:data), marker.schema == 1 else { continue }
+            // UIの保存workerと、終了結果を保存するmonitorの両方が退出するまで削除しない。
+            let recovery = Darwin.open(url.appendingPathComponent(".recovery.lock").path,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0o600)
             var deletable = false
-            if probe >= 0 {
-                if flock(probe,LOCK_EX|LOCK_NB) == 0 {
-                    deletable = marker.closed || now.timeIntervalSince(marker.created) >= policy.interruptionGrace
+            if recovery >= 0 {
+                probes.append(recovery)
+                if flock(recovery,LOCK_EX|LOCK_NB) == 0 {
+                    let probe = Darwin.open(url.appendingPathComponent(".session.lock").path,O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0o600)
+                    if probe >= 0 {
+                        probes.append(probe)
+                        if flock(probe,LOCK_EX|LOCK_NB) == 0 {
+                            if !marker.closed, marker.interruptedAt == nil {
+                                marker.interruptedAt = now; try write(marker,to:url)
+                            }
+                            deletable = marker.closed || marker.interruptedAt.map { now.timeIntervalSince($0) >= policy.interruptionGrace } == true
+                        }
+                    }
                 }
-                probes.append(probe)
             }
             items.append((url,marker,try size(url),deletable))
         }
@@ -71,8 +82,14 @@ final class SessionArchive {
         guard fd >= 0, flock(fd,LOCK_EX|LOCK_NB) == 0 else {
             if fd >= 0 { Darwin.close(fd); fd = -1 }; throw Self.failure("記録は別のアプリで利用中です")
         }
+        // 初回pruneと起動が近接していても、実際に開いたセッションを中断済みのままにしない。
+        do {
+            marker = try JSONDecoder().decode(Marker.self,from:Data(contentsOf:directory.appendingPathComponent(Self.markerName)))
+            guard marker.schema == 1 else { throw Self.failure("管理対象の保存先ではありません") }
+            if marker.interruptedAt != nil { marker.interruptedAt = nil; try Self.write(marker,to:directory) }
+        } catch { Darwin.close(fd); fd = -1; throw error }
     }
-    func setClosed(_ closed: Bool) throws { marker.closed = closed; try Self.write(marker,to:directory) }
+    func setClosed(_ closed: Bool) throws { marker.closed = closed; marker.interruptedAt = nil; try Self.write(marker,to:directory) }
     func checkWrite(bytes: Int, name: String) throws {
         guard !name.contains("/"), bytes >= 0 else { throw Self.failure("保存名が不正です") }
         var old = stat(); let target = directory.appendingPathComponent(name)

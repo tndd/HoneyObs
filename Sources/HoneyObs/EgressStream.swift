@@ -4,10 +4,16 @@ import Network
 import Darwin
 import Security
 
+protocol EgressGuestSocket: AnyObject {
+    var fileDescriptor: Int32 { get }
+    func close()
+}
+extension VZVirtioSocketConnection: EgressGuestSocket {}
+
 // 1本のvsockと固定宛先TCPの所有。close完了はworkerとNWの終了後だけ通知する。
 final class EgressStream {
     enum Mode { case origin, edge, provision }
-    private let guest: VZVirtioSocketConnection
+    private let guest: EgressGuestSocket
     private let host: NWEndpoint.Host
     private let port: NWEndpoint.Port
     private let mode: Mode
@@ -22,7 +28,7 @@ final class EgressStream {
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "honeyobs.egress.stream")
 
-    init(guest: VZVirtioSocketConnection, host: String, port: UInt16, mode: Mode, permit: ForwardingPermit, finished: @escaping () -> Void) {
+    init(guest: EgressGuestSocket, host: String, port: UInt16, mode: Mode, permit: ForwardingPermit, finished: @escaping () -> Void) {
         self.guest = guest; self.host = NWEndpoint.Host(host); self.port = NWEndpoint.Port(rawValue: port)!
         self.mode = mode; self.permit = permit; self.finished = finished
     }
@@ -47,10 +53,13 @@ final class EgressStream {
         while result.count < size && live {
             if let until, safetyTime() >= until { return nil }
             let n = Darwin.read(guest.fileDescriptor, &buffer, size - result.count)
-            if n > 0 { result.append(contentsOf: buffer.prefix(n)) }
+            if n > 0 {
+                guard live else { return nil }
+                result.append(contentsOf: buffer.prefix(n))
+            }
             else if n == 0 || (errno != EAGAIN && errno != EINTR) { return nil }
         }
-        return result.count == size ? result : nil
+        return result.count == size && live ? result : nil
     }
     private func record(until: Double? = nil) -> Data? {
         guard let header = exact(5, until: until) else { return nil }
@@ -62,11 +71,24 @@ final class EgressStream {
     private func send(_ bytes: Data, to connection: NWConnection) -> Bool {
         let signal = DispatchSemaphore(value: 0)
         let outcome = EgressSendResult()
-        connection.send(content: bytes, completion: .contentProcessed { error in outcome.ok = error == nil; signal.signal() })
+        guard issueIfLive({
+            connection.send(content: bytes, completion: .contentProcessed { error in outcome.ok = error == nil; signal.signal() })
+        }) else { return false }
         let deadline = safetyTime() + 4
         while signal.wait(timeout: .now() + 0.1) != .success { if !live || safetyTime() >= deadline { return false } }
         return live && outcome.ok
     }
+    private func issueIfLive(_ action: () -> Void) -> Bool {
+        // lock→permitの順序はliveと同じ。cancel/revokeが成立した後の新規発行を防ぐ。
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return false }
+        return permit.ifValid(action)
+    }
+    #if EGRESS_STREAM_TESTING
+    func testingSend(_ bytes: Data, to connection: NWConnection) -> Bool { send(bytes, to: connection) }
+    func testingExact(_ size: Int) -> Data? { exact(size) }
+    func testingIssue(_ action: () -> Void) -> Bool { issueIfLive(action) }
+    #endif
     private func run() {
         defer {
             cancel(); socketLock.lock(); if !guestClosed { guestClosed = true; guest.close() }; socketLock.unlock()
@@ -100,9 +122,6 @@ final class EgressStream {
             parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         } else { parameters = .tcp }
         let nw = NWConnection(host: host, port: port, using: parameters)
-        lock.lock()
-        guard !closed else { lock.unlock(); return }
-        network = nw; networkEnded = false; lock.unlock()
         let ready = DispatchSemaphore(value: 0)
         nw.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -114,7 +133,10 @@ final class EgressStream {
             default: break
             }
         }
-        nw.start(queue: queue)
+        guard issueIfLive({
+            network = nw; networkEnded = false
+            nw.start(queue: queue)
+        }) else { return }
         let deadline = safetyTime() + 4
         while ready.wait(timeout: .now() + 0.1) != .success { if !live || safetyTime() >= deadline { return } }
         guard live, first.isEmpty || send(first, to: nw) else { return }
@@ -135,7 +157,7 @@ final class EgressStream {
             } else {
                 var buffer = [UInt8](repeating: 0, count: 4096)
                 let n = Darwin.read(guest.fileDescriptor, &buffer, buffer.count)
-                if n > 0 { if !send(Data(buffer.prefix(n)), to: nw) { return } }
+                if n > 0 { guard live, send(Data(buffer.prefix(n)), to: nw) else { return } }
                 else if n == 0 || (errno != EAGAIN && errno != EINTR) { return }
             }
         }

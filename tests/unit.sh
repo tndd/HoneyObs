@@ -1,5 +1,5 @@
 #!/bin/bash
-# VM・同梱カーネル・ネットワーク・インストール済みアプリを使わない検証。
+# VM・同梱カーネル・外部ネットワーク・インストール済みアプリを使わない検証。通信競合はlocalhostで確認する。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p test-results/unit-bin
@@ -13,6 +13,7 @@ test-results/unit-bin/observation-drain
 swiftc -swift-version 5 -framework Network -framework Virtualization \
   Sources/HoneyObs/Relay.swift tests/PermitChecks.swift -o test-results/unit-bin/permit
 test-results/unit-bin/permit
+bash tests/egress_revocation.sh
 swiftc -swift-version 5 Sources/HoneyObs/{LaunchOptions,SessionArchive}.swift tests/LaunchOptionsChecks.swift \
   -o test-results/unit-bin/launch-options
 test-results/unit-bin/launch-options
@@ -22,6 +23,9 @@ test-results/unit-bin/session-archive
 swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveLockChecks.swift \
   -o test-results/unit-bin/session-archive-lock
 test-results/unit-bin/session-archive-lock
+swiftc -swift-version 5 Sources/HoneyObs/SessionArchive.swift tests/SessionArchiveRecoveryChecks.swift \
+  -o test-results/unit-bin/session-archive-recovery
+test-results/unit-bin/session-archive-recovery
 swiftc -swift-version 5 Sources/HoneyObs/BoundedConsole.swift tests/BoundedConsoleChecks.swift \
   -o test-results/unit-bin/bounded-console
 test-results/unit-bin/bounded-console
