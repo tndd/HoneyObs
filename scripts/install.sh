@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
-source_app="$PWD/build/HoneyObs.app"
+source_app="$PWD/build/Applications.noindex/HoneyObs.app"
 rollback=0
 if [[ "${1:-}" == --rollback ]]; then rollback=1; shift; fi
 if (( $# > 1 )); then echo '使用法: install.sh [--rollback] [インストール先ディレクトリ]' >&2; exit 2; fi
@@ -11,26 +11,40 @@ install_root="${1:-$HOME/Applications}"
 mkdir -p "$install_root"
 install_root="$(cd "$install_root" && pwd -P)"
 target_app="$install_root/HoneyObs.app"
-backup_app="$install_root/.HoneyObs-previous.app"
+app_storage="$install_root/Applications.noindex"
+backup_app="$app_storage/.HoneyObs-previous.app"
+legacy_backup_app="$install_root/.HoneyObs-previous.app"
 install_lock="$install_root/.HoneyObs-install.lock"
 if ! mkdir "$install_lock" 2>/dev/null; then
   echo "別の導入処理が進行中か、以前のロックが残っています: $install_lock" >&2; exit 1
 fi
 trap 'rmdir "$install_lock"' EXIT
-if (( rollback )); then source_app="$backup_app"; fi
-if [[ -L "$target_app" || -L "$backup_app" ]]; then echo 'アプリのシンボリックリンクは置換できません。' >&2; exit 1; fi
+if [[ -L "$app_storage" || -L "$target_app" || -L "$backup_app" || -L "$legacy_backup_app" ]]; then
+  echo 'アプリと保存先のシンボリックリンクは置換できません。' >&2; exit 1
+fi
+if [[ -e "$backup_app" && -e "$legacy_backup_app" ]]; then
+  echo '旧配置と新配置のバックアップが両方存在します。両版を確認してから導入してください。' >&2; exit 1
+fi
+if (( rollback )); then
+  source_app="$backup_app"
+  if [[ ! -e "$source_app" ]]; then source_app="$legacy_backup_app"; fi
+fi
 test -f "$source_app/Contents/Resources/AppIcon.icns"
 codesign --verify --deep --strict "$source_app"
 # 実行ファイルを開いているプロセスを確認する。パスを正規表現へ展開しない。
-for protected_app in "$target_app" "$backup_app"; do
+for protected_app in "$target_app" "$backup_app" "$legacy_backup_app"; do
   for protected_executable in "$protected_app/Contents/MacOS/HoneyObs" "$protected_app/Contents/Helpers/HoneyObsSession"; do
     if [[ -e "$protected_executable" ]] && /usr/sbin/lsof -t "$protected_executable" >/dev/null 2>&1; then
       echo 'HoneyObsを終了してからインストールしてください。' >&2; exit 1
     fi
   done
 done
-stage="$(mktemp -d "$install_root/.HoneyObs-install.XXXXXX")"
-old_app=""; prior_backup=""; candidate_installed=0; promoting_backup=0; committed=0
+mkdir -p "$app_storage"
+if [[ "$(/usr/bin/stat -f '%d' "$app_storage")" != "$(/usr/bin/stat -f '%d' "$install_root")" ]]; then
+  echo 'バックアップ保存先は導入先と同じファイルシステムである必要があります。' >&2; exit 1
+fi
+stage="$(mktemp -d "$app_storage/.HoneyObs-install.XXXXXX")"
+old_app=""; prior_backup=""; candidate_installed=0; promoting_backup=0; committed=0; legacy_migrated=0
 register_app() {
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$target_app"
 }
@@ -47,8 +61,11 @@ cleanup() {
       if (( ! recovery_failed )); then mv "$old_app" "$target_app" || recovery_failed=1; fi
       if (( ! recovery_failed )); then register_app || true; fi
     fi
-    if [[ -n "$prior_backup" && -e "$prior_backup" ]]; then
+    if (( ! recovery_failed )) && [[ -n "$prior_backup" && -e "$prior_backup" ]]; then
       mv "$prior_backup" "$backup_app" || recovery_failed=1
+    fi
+    if (( legacy_migrated && ! recovery_failed )) && [[ ! -e "$legacy_backup_app" && -e "$backup_app" ]]; then
+      mv "$backup_app" "$legacy_backup_app" || recovery_failed=1
     fi
   fi
   if (( recovery_failed )); then
@@ -63,6 +80,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [[ -e "$legacy_backup_app" ]]; then
+  # 既存旧版を索引外へ移す。途中失敗ならcleanupが元の配置へ戻す。
+  legacy_migrated=1
+  mv "$legacy_backup_app" "$backup_app"
+  if (( rollback )); then source_app="$backup_app"; fi
+fi
 /usr/bin/ditto "$source_app" "$stage/HoneyObs.app"
 codesign --verify --deep --strict "$stage/HoneyObs.app"
 if [[ -e "$target_app" ]]; then

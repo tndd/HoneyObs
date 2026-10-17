@@ -12,7 +12,7 @@ import socket
 import subprocess
 import time
 import uuid
-from qa_registry import register_app, require_cleanup
+from qa_registry import generated_app_path, register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -98,14 +98,15 @@ def bootout(run):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--app', type=Path, default=ROOT / 'build/HoneyObs.app')
+    parser.add_argument('--app', type=Path, default=ROOT / 'build/Applications.noindex/HoneyObs.app')
     parser.add_argument('--output', type=Path, default=ROOT / 'test-results' / ('final-observation-' + time.strftime('%Y%m%d-%H%M%S')))
     parser.add_argument('--source-head', default='', help='ビルド元として申告されたHEAD。binary SHAも別に記録する')
     parser.add_argument('--tail-count', type=int, default=128)
     options = parser.parse_args()
     assert 1 <= options.tail_count <= 128
-    output = options.output.resolve(); output.mkdir(mode=0o700, parents=True, exist_ok=True)
-    app = output / 'private/HoneyObs.app'
+    output = options.output.absolute()
+    app = generated_app_path(output / 'private')
+    output.mkdir(mode=0o700, parents=True, exist_ok=True)
     source = options.app.resolve()
     if source != app:
         assert not app.exists(), '既存の試験コピーを上書きしません'

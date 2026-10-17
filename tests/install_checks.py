@@ -19,7 +19,7 @@ LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 class InstallChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.shared = tempfile.TemporaryDirectory(prefix='HoneyObs-install-fixture-')
+        cls.shared = tempfile.TemporaryDirectory(prefix='HoneyObs-install-fixture-', suffix='.noindex')
         cls.binary = Path(cls.shared.name) / 'HoneyObs'
         subprocess.run(['cc', '-x', 'c', '-', '-o', str(cls.binary)],
                        input=b'#include <unistd.h>\nint main(void) { for (;;) pause(); }\n', check=True)
@@ -29,7 +29,7 @@ class InstallChecks(unittest.TestCase):
         cls.shared.cleanup()
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='HoneyObs-install-check-')
+        self.temp = tempfile.TemporaryDirectory(prefix='HoneyObs-install-check-', suffix='.noindex')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.destination = self.root / 'Applications [fixture]'
@@ -54,19 +54,26 @@ fi
 if [[ "${FIXTURE_FAIL:-}" == backup && "$1" == */previous.app && "$2" == */.HoneyObs-previous.app && ! -e "$FIXTURE_MARK" ]]; then
   touch "$FIXTURE_MARK"; exit 1
 fi
-if [[ "${FIXTURE_FAIL:-}" == recovery && ( "$1" == */.HoneyObs-install.*/HoneyObs.app || "$1" == */previous.app ) ]]; then exit 1; fi
+if [[ "${FIXTURE_FAIL:-}" == legacy && "$1" == */.HoneyObs-previous.app && "$2" == */Applications.noindex/.HoneyObs-previous.app && ! -e "$FIXTURE_MARK" ]]; then
+  touch "$FIXTURE_MARK"; exit 1
+fi
+if [[ "${FIXTURE_FAIL:-}" == recovery && ( "$1" == */.HoneyObs-install.*/HoneyObs.app || "$1" == */previous.app ) ]]; then touch "$FIXTURE_MARK"; exit 1; fi
 if [[ ( "${FIXTURE_FAIL:-}" == signal-old && "$2" == */previous.app ) ||
       ( "${FIXTURE_FAIL:-}" == signal-candidate && "$1" == */.HoneyObs-install.*/HoneyObs.app ) ||
+      ( "${FIXTURE_FAIL:-}" == signal-legacy && "$1" == */.HoneyObs-previous.app && "$2" == */Applications.noindex/.HoneyObs-previous.app ) ||
       ( "${FIXTURE_FAIL:-}" == signal-backup && "$1" == */previous.app && "$2" == */.HoneyObs-previous.app ) ]]; then
+  touch "$FIXTURE_MARK"
   /bin/mv "$@" || exit 1
   kill -TERM "$PPID"
   exit 0
 fi
 exec /bin/mv "$@"
 ''')
-        self.source = self.root / 'build/HoneyObs.app'
+        self.source = self.root / 'build/Applications.noindex/HoneyObs.app'
         self.target = self.destination / 'HoneyObs.app'
-        self.backup = self.destination / '.HoneyObs-previous.app'
+        self.storage = self.destination / 'Applications.noindex'
+        self.backup = self.storage / '.HoneyObs-previous.app'
+        self.legacy = self.destination / '.HoneyObs-previous.app'
         self.make_app(self.source, 'new')
 
     def write_command(self, name, source):
@@ -137,9 +144,10 @@ exec /bin/mv "$@"
                 self.make_app(self.target, 'old')
                 self.make_app(self.backup, 'older')
                 self.install(fail=failure, succeeds=False)
+                self.assertTrue((self.root / 'failed-once').exists(), '故障注入が発火していません: ' + failure)
                 self.assertEqual(self.version(self.target), 'old')
                 self.assertEqual(self.version(self.backup), 'older')
-                self.assertFalse(list(self.destination.glob('.HoneyObs-install.*')))
+                self.assertFalse(list(self.storage.glob('.HoneyObs-install.*')))
                 shutil.rmtree(self.target)
                 shutil.rmtree(self.backup)
                 (self.root / 'failed-once').unlink(missing_ok=True)
@@ -147,10 +155,78 @@ exec /bin/mv "$@"
     def test_failed_recovery_retains_old_bundle(self):
         self.make_app(self.target, 'old')
         result = self.install(fail='recovery', succeeds=False)
+        self.assertTrue((self.root / 'failed-once').exists())
         self.assertIn('旧版を削除せず保持', result.stderr)
-        stages = list(self.destination.glob('.HoneyObs-install.*'))
+        stages = list(self.storage.glob('.HoneyObs-install.*'))
         self.assertEqual(len(stages), 1)
         self.assertEqual(self.version(stages[0] / 'previous.app'), 'old')
+
+    def test_legacy_backup_migrates_for_update_and_rollback(self):
+        for rollback in [False, True]:
+            with self.subTest(rollback=rollback):
+                self.make_app(self.target, 'old')
+                self.make_app(self.legacy, 'older')
+                self.install(rollback=rollback)
+                self.assertEqual(self.version(self.target), 'older' if rollback else 'new')
+                self.assertEqual(self.version(self.backup), 'old')
+                self.assertFalse(self.legacy.exists())
+                shutil.rmtree(self.target); shutil.rmtree(self.backup)
+
+    def test_legacy_migration_failures_restore_both_original_locations(self):
+        for failure in ['legacy', 'signal-legacy', 'candidate', 'register', 'backup', 'signal-backup']:
+            with self.subTest(failure=failure):
+                self.make_app(self.target, 'old')
+                self.make_app(self.legacy, 'older')
+                self.install(fail=failure, succeeds=False)
+                self.assertTrue((self.root / 'failed-once').exists(), failure)
+                self.assertEqual(self.version(self.target), 'old')
+                self.assertEqual(self.version(self.legacy), 'older')
+                self.assertFalse(self.backup.exists())
+                self.assertFalse(list(self.storage.glob('.HoneyObs-install.*')))
+                shutil.rmtree(self.target); shutil.rmtree(self.legacy)
+                (self.root / 'failed-once').unlink()
+
+    def test_failed_legacy_recovery_retains_every_old_version(self):
+        self.make_app(self.target, 'old')
+        self.make_app(self.legacy, 'older')
+        self.install(fail='recovery', succeeds=False)
+        self.assertTrue((self.root / 'failed-once').exists())
+        self.assertEqual(self.version(self.backup), 'older')
+        stages = list(self.storage.glob('.HoneyObs-install.*'))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual(self.version(stages[0] / 'previous.app'), 'old')
+
+    def test_legacy_new_backup_collision_preserves_all_versions(self):
+        self.make_app(self.target, 'old')
+        self.make_app(self.backup, 'older-new-location')
+        self.make_app(self.legacy, 'older-legacy-location')
+        result = self.install(succeeds=False)
+        self.assertIn('両方存在', result.stderr)
+        self.assertEqual(self.version(self.target), 'old')
+        self.assertEqual(self.version(self.backup), 'older-new-location')
+        self.assertEqual(self.version(self.legacy), 'older-legacy-location')
+
+    def test_legacy_main_and_helper_running_refuse_migration(self):
+        self.make_app(self.legacy, 'older')
+        for executable in ['MacOS/HoneyObs', 'Helpers/HoneyObsSession']:
+            with self.subTest(executable=executable):
+                process = subprocess.Popen([str(self.legacy / 'Contents' / executable)])
+                try:
+                    result = self.install(succeeds=False)
+                    self.assertIn('終了してから', result.stderr)
+                    self.assertEqual(self.version(self.legacy), 'older')
+                    self.assertFalse(self.backup.exists())
+                finally:
+                    process.terminate(); process.wait(timeout=5)
+
+    def test_noindex_storage_symlink_refuses_before_copy_or_migration(self):
+        outside = self.root / 'other.noindex'; outside.mkdir()
+        self.storage.symlink_to(outside, target_is_directory=True)
+        self.make_app(self.legacy, 'older')
+        result = self.install(succeeds=False)
+        self.assertIn('シンボリックリンク', result.stderr)
+        self.assertEqual(self.version(self.legacy), 'older')
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_invalid_source_preserves_current(self):
         self.make_app(self.target, 'old')

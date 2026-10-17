@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import os
 from pathlib import Path
+from build_paths import build_app
 import shutil
 import stat
 import subprocess
@@ -13,7 +14,7 @@ import prepare
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / '.cache'
-RES = ROOT / 'build/HoneyObs.app/Contents/Resources'
+RES = build_app(ROOT) / 'Contents/Resources'
 URL = 'https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-linux-arm64'
 SHA256 = 'e6422b9d4f72d3194bc5a38676f13667c06666523217b842a877d72a80b5ac08'
 

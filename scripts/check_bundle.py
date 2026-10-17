@@ -7,6 +7,7 @@
 import argparse
 import json
 from pathlib import Path
+from build_paths import build_app
 import plistlib
 import subprocess
 import sys
@@ -65,7 +66,7 @@ def check(app, distribution=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('app', nargs='?', type=Path, default=ROOT / 'build/HoneyObs.app')
+    parser.add_argument('app', nargs='?', type=Path, default=build_app(ROOT))
     parser.add_argument('--distribution', action='store_true')
     args = parser.parse_args()
     try:

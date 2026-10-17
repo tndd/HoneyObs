@@ -5,6 +5,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+from build_paths import build_app
 import shutil
 import stat
 import subprocess
@@ -14,7 +15,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / '.cache'
-RES = ROOT / 'build/HoneyObs.app/Contents/Resources'
+RES = build_app(ROOT) / 'Contents/Resources'
 DEPENDENCIES = [
     ('linux-virt.apk', 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.56-r0.apk',
      'e3839bfd751ff0a4421484f712b9b29efb514024523736a0ef62521521571b12'),

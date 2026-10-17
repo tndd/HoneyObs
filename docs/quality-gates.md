@@ -12,6 +12,8 @@ PRとmainへのpushでは次の3ジョブを実行します。必要な権限は
 
 Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一時ディレクトリだけを使い、Launch Services登録をfixtureへ置き換えます。ユーザーのアプリと登録DBは変更しません。
 
+開発バンドルは `build/Applications.noindex/HoneyObs.app`、QAコピーは各 `test-results` 内の `Applications.noindex/HoneyObs.app` にだけ生成します。導入fixtureの一時親も `.noindex` にします。`qa_registry_checks.py` はコピー前の保存先、symlink・別tree・通常の親・別IDの拒否と、登録後のID差替え拒否を検査します。製品IDとsession-jobs専用fixture IDの登録解除は、起動したそのパスだけを対象に成功記録の前に確認します。Spotlightの索引除外とLaunch Services登録解除は別の境界です。以前の索引や残存コピーの回収はこのfixture検査では証明しません。
+
 画面ジョブでは `tests/live_dashboard.cjs` も実行し、固定状態で右下シールド・応答と記録の分離・中止・完了後の復帰・縮小画面・動き軽減を確認します。
 
 ## 実Macの別ゲート
@@ -27,6 +29,8 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 `tests/installed_app.py` は導入済みアプリを対象にする別検証です。専用ゲートに自動混入させません。`tests/permit_faults.py` は現行buildの署名済み私有コピーとlocalhostを用い、mainの5秒停止・JS無限ループ、期限後HTTP拒否、VM回収と非復活を確認し、専用ゲートにも含めます。
 
 実アプリを起動するPython検査は `tests/qa_registry.py` にそのアプリだけを記録し、全caseの稼働・回収判定後、成功reportとPASS表示より前に `lsregister -u` の成功を明示確認します。失敗は非zeroへ伝播し、atexitでは失敗・中断時の残りだけを再試行します。専用ゲートのEXITはゲート排他だけを解除し、子が解除済みのアプリを二重に解除しません。この作業treeのbuild/test-results内のHoneyObs以外、導入済みアプリ、別worktree、symlinkは受け付けず、登録一覧の探索や一括解除はしません。検査中のプロセスやVMをこの処理で終了させることもありません。
+
+索引対象外の非GUI fixtureは最初からLaunch Servicesに登録されないことがあります。`lsregister -u` がnot-found（-10814）を返した場合だけ、読み取り専用の `LSCopyApplicationURLsForBundleIdentifier` でそのID・正確なURLの未登録を独立確認します。CLIのnot-foundだけでは成功とせず、登録が残る・照会失敗・不明な応答・照会中のpath/ID差替えは非zeroのままです。他の解除エラーは従来どおり失敗し、atexitによる再試行対象を保持します。
 
 ## 製品と検証の境界
 

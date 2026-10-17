@@ -27,7 +27,7 @@ def main():
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-framework', 'Virtualization',
                     str(ROOT / 'tests/EgressPrivileges.swift'), '-o', str(runner)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', '--entitlements', str(ROOT / 'entitlements.plist'), str(runner)], check=True)
-    kernel = ROOT / 'build/HoneyObs.app/Contents/Resources/vmlinuz'
+    kernel = ROOT / 'build/Applications.noindex/HoneyObs.app/Contents/Resources/vmlinuz'
     subprocess.run([str(runner), str(kernel), str(ramdisk), str(directory / 'console.log')], check=True, timeout=40)
 
 if __name__ == '__main__':

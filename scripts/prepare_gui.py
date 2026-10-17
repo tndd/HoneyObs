@@ -5,12 +5,13 @@ import gzip
 import hashlib
 import ipaddress
 from pathlib import Path
+from build_paths import build_app
 import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / '.cache'
-RES = ROOT / 'build/HoneyObs.app/Contents/Resources'
+RES = build_app(ROOT) / 'Contents/Resources'
 NAME = 'dbip-country-lite-2026-10.csv.gz'
 SHA256 = '097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80'
 

@@ -41,6 +41,8 @@ Apple Silicon Macの隔離VMで模擬HTTPサービスを動かし、受信・拒
 
 開発にはSwift Command Line Tools、Go 1.24以降、Python 3が必要です。ビルド依存物のバージョンとSHA-256を固定します。
 
+生成バンドルは `build/Applications.noindex/HoneyObs.app`、QAの私有コピーは各 `test-results` 内の `Applications.noindex` に置き、Spotlightへ開発版が重複表示されることを防ぎます。ログの保存先は変えません。通常利用する導入先は `~/Applications/HoneyObs.app` です。QA終了時のLaunch Services登録解除は別に検査します。
+
 ```sh
 bash scripts/build.sh
 python3 scripts/check_bundle.py

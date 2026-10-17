@@ -9,11 +9,12 @@ import signal
 import subprocess
 import time
 import uuid
+from qa_registry import generated_app_path, register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'test-results' / ('session-jobs-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
 OUT.mkdir(mode=0o700, parents=True)
-APP = OUT / 'HoneyObs.app'
+APP = generated_app_path(OUT)
 EXE = APP / 'Contents/MacOS/HoneyObs'
 HELPER = APP / 'Contents/Helpers/HoneyObsSession'
 EXE.parent.mkdir(parents=True)
@@ -66,6 +67,7 @@ for sources, target in [(['Sources/HoneyObs/SessionOwnership.swift', 'tests/Sess
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', *sources, '-o', str(target)], cwd=ROOT, check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True, capture_output=True)
 subprocess.run(['codesign', '--force', '--sign', '-', str(APP)], check=True, capture_output=True)
+register_app(APP)
 
 archive_probe = OUT / 'archive-probe'
 subprocess.run(['swiftc', '-swift-version', '5', 'Sources/HoneyObs/SessionArchive.swift', 'tests/SessionArchiveRecoveryChecks.swift',
@@ -185,5 +187,6 @@ finally:
                 item['wrapper'].kill(); item['wrapper'].wait()
         item['log'].close()
 
+require_cleanup()
 (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
 print('実launchdの相互回収（GUI/VMなし）: PASS', OUT)

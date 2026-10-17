@@ -1,5 +1,23 @@
 # 検証記録
 
+## Alfredの重複解消と生成アプリの索引除外（2026-10-17、PR #27）
+
+開発・QAの `.app` が検索対象に残り、Alfredに複数のHoneyObsが表示されていた。生成先を `build/Applications.noindex/HoneyObs.app` と各QA runの `Applications.noindex/` へ統一し、導入時のstage・前版・復旧用の保持版も `~/Applications/Applications.noindex/` 配下へ置く。通常の導入先は `~/Applications/HoneyObs.app`。ログ・state・reportのrunパスは維持する。
+
+既知の開発・QA bundle 23件は、所有範囲・ID・実行ファイル・symlink・稼働プロセスを確認して同じfilesystemの索引外へ移し、移動前後の内容hash一致を確認した（`test-results/launcher-migration-20261017-092149.json`）。削除や索引/LaunchServices全体のリセットは行っていない。利用者からもAlfredでの解消を確認済み。実装統合点 `8927fd3` の検証は次の通り。
+
+| 検証 | 結果と証拠 |
+| --- | --- |
+| 単体・導入復旧・QA境界 | `bash tests/unit.sh` 合格。導入復旧18件、QA境界21件を含む。旧backup移行・衝突・main/helper稼働中・symlink/別filesystemの拒否・失敗時の版の保持を確認（`test-results/launcher-final-unit.log`） |
+| 未登録fixtureの判定 | 初回の実Mac回帰では、索引外の非GUI fixtureに対する登録解除が-10814となり正しく失敗した。CLI結果だけでは成功にせず、公開APIで正確なURLの不在を独立確認する場合だけ受理する修正を追加。登録残存・照会失敗・差替えは失敗を維持し、実 `session_jobs` の再検証も合格（`test-results/session-jobs-20261017-092842-79c139/`） |
+| ブラウザ | `npm test` と `node tests/live_dashboard.cjs` 合格。選択、HTML表示、128件、右下シールド、応答と記録の分離、中止、縮小画面、動き軽減、外部通信なしを確認（`test-results/launcher-browser.log`） |
+| 実Macの各回帰項目 | 新配置でビルド/署名、制御、独立job、VM隔離、停止I/O、権限、通信VM、Relay取消、最終観測、所有故障、localhost自己ペネ20ケース/160要求/低速接続、最小化・非表示が合格（`test-results/launcher-full-gate-final.log`） |
+| 実メニューと失効 | 上記一括実行はメニューが4.2秒前に閉じてexit 1となった。入力/前面切替の観測後、利用者が操作を控えた別実行で同じソースのメニュー保持4.449秒、UI/guest freshness、HTTP、同じjob、VM回収が合格。続くmain/UI停止による失効・既存接続終了・新規拒否も合格（`test-results/menu-tracking-20261017-094546-3e110c/`、`test-results/permit-faults-20261017-094719/`）。一括script自体のexit 0とは区別する |
+| 実際の更新と通常起動 | 旧0.3.0 build 4をhash/署名を保って索引外へ退避し、新installerで0.3.1 build 5を導入。直前版も索引外にあり、stage残存なし、正式版/直前版/退避版の深い署名検証が合格。`/tmp` から通常起動し、導入先と実行先、アイコン、repo非参照、重複起動の同じPID、Quit時の両job/IPC消滅、再起動後の待機/VMなしを確認（`test-results/launcher-installed-layout.json`、`test-results/normal-installed-20261017-094802/`） |
+| 最終索引・登録 | 名前とBundle IDの両索引検索、および公開APIの登録URLが正式版1件のみ。退避した旧版の残存登録はその正確なURLだけ解除し、fixtureの未登録も確認した。最終状態は通常アプリの待機中、公開なし、両VMなし（`test-results/launcher-final-receipt.json`） |
+
+外部公開経路、実スリープ、VM基盤の脱出耐性、配布用署名・公証の未検証範囲は、この変更では回収しない。Issue #2を継続する。
+
 ## 追加レビュー5件の修正（2026-10-17、0.3.1 build 5）
 
 [PR #25の追加レビュー](https://github.com/tndd/HoneyObs/pull/25#issuecomment-6222966553)を対象に、修正前の再現と修正後の回帰を追加した。環境はApple Silicon・macOS 15.8.1・Swift 6.2.4、製品コードの統合点は `fa19e39`。後続のQA・文書変更は別途記録する。

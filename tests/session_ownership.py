@@ -19,7 +19,7 @@ options_parser.add_argument('--egress-fixture', action='store_true', help='EGRES
 options_parser.add_argument('--case', action='append', default=[], help='指定した故障だけ再検証する')
 OPTIONS = options_parser.parse_args()
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-APP = pathlib.Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
+APP = pathlib.Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/Applications.noindex/HoneyObs.app')).resolve()
 OUT = ROOT / 'test-results' / ('session-ownership-' + time.strftime('%Y%m%d-%H%M%S'))
 OUT.mkdir(mode=0o700, parents=True)
 REPORT = {'actualVM': True, 'externalTunnel': False, 'actualEgressVM': OPTIONS.egress_fixture, 'cases': {},
