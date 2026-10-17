@@ -10,12 +10,21 @@ on:
         description: 専用の実Macでlocalhost VM検証を実行する
         type: boolean
         default: false
+      external_url:
+        description: 本人限定を確認済みのQuick Tunnel URL（停止の独立観測だけを実行）
+        type: string
+        default: ''
+      witness_seconds:
+        description: 外部観測の時間（30〜600秒）
+        type: number
+        default: 240
 
 permissions:
   contents: read
 
 jobs:
   guest:
+    if: github.event_name != 'workflow_dispatch' || inputs.external_url == ''
     name: ゲストの競合検出
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -32,6 +41,7 @@ jobs:
         working-directory: egress
 
   dashboard:
+    if: github.event_name != 'workflow_dispatch' || inputs.external_url == ''
     name: Playwrightの画面検証
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -56,6 +66,7 @@ jobs:
           retention-days: 7
 
   swift:
+    if: github.event_name != 'workflow_dispatch' || inputs.external_url == ''
     name: VM非依存のSwiftと導入復旧
     runs-on: macos-15
     timeout-minutes: 10
@@ -66,6 +77,7 @@ jobs:
           go-version-file: guest/go.mod
           cache: false
       - run: bash tests/unit.sh
+      - run: python3 -m unittest discover -s tests -p test_external_witness.py
       - run: bash tests/egress.sh
       - name: 製品Swiftの型検査
         run: swiftc -swift-version 5 -typecheck -framework Cocoa -framework Virtualization -framework Network -framework WebKit Sources/HoneyObs/*.swift
@@ -76,7 +88,7 @@ jobs:
 
   local-vm:
     name: 実Macのlocalhost VMゲート
-    if: github.event_name == 'workflow_dispatch' && inputs.local_vm
+    if: github.event_name == 'workflow_dispatch' && inputs.local_vm && inputs.external_url == ''
     needs: [guest, dashboard, swift]
     runs-on: [self-hosted, macOS, ARM64, honeyobs-vm]
     timeout-minutes: 20
@@ -87,3 +99,28 @@ jobs:
           go-version-file: guest/go.mod
           cache: false
       - run: bash scripts/local_vm_gate.sh
+
+  external-witness:
+    name: 本人限定トンネルの独立外部観測
+    if: github.event_name == 'workflow_dispatch' && inputs.external_url != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: 入力境界と停止の判定を検査
+        run: python3 -m unittest discover -s tests -p test_external_witness.py
+      - name: 外部から本人限定の認証入口を事前確認
+        env:
+          WITNESS_URL: ${{ inputs.external_url }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --baseline-only --output test-results/external-witness/preflight.json
+      - name: 未認証の転送とCloudflare 1033を新規・継続接続で観測
+        env:
+          WITNESS_URL: ${{ inputs.external_url }}
+          WITNESS_SECONDS: ${{ inputs.witness_seconds }}
+        run: python3 tests/external_witness.py --url "$WITNESS_URL" --seconds "$WITNESS_SECONDS" --output test-results/external-witness/report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-witness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/external-witness/*.json
+          retention-days: 1
