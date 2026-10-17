@@ -8,14 +8,14 @@ import shutil
 import subprocess
 import time
 import uuid
-from qa_registry import register_app, require_cleanup
+from qa_registry import generated_app_path, register_app, require_cleanup
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--expect-menu-failure', action='store_true', help='修正前の再現証拠だけを採取する')
 options = parser.parse_args()
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'test-results' / ('menu-tracking-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
-APP = OUT / 'HoneyObs.app'; EXE = APP / 'Contents/MacOS/HoneyObs'; HELPER = APP / 'Contents/Helpers/HoneyObsSession'
+APP = generated_app_path(OUT); EXE = APP / 'Contents/MacOS/HoneyObs'; HELPER = APP / 'Contents/Helpers/HoneyObsSession'
 EXE.parent.mkdir(parents=True); HELPER.parent.mkdir(parents=True)
 shutil.copy2(ROOT / 'Info.plist', APP / 'Contents/Info.plist')
 source = os.environ.get('SESSION_OWNERSHIP_SOURCE', 'Sources/HoneyObs/SessionOwnership.swift')

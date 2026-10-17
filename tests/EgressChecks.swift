@@ -68,7 +68,7 @@ import Darwin
         }
         fake.start(queue:.main); wait(until:{fakePort != 0},seconds:3); check(fakePort != 0,"fake edge listener")
         var failure = "", ready = false, apiRequests = 0, apiAllowed = false, edgeChannels = 0, badSNIDeniedBeforeAPI = false, pending: [UUID:EgressStream] = [:]
-        let subject = EgressVM(resources:root.appendingPathComponent("build/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,onFailure:{failure=$0})
+        let subject = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory,originPort:12345,originHost:"egress-test.invalid",permit:permit,onFailure:{failure=$0})
         subject.testHandler = {port,connection,finished in
             if port == 9002 {
                 edgeChannels += 1
@@ -111,7 +111,7 @@ import Darwin
         let report: [String:Any] = ["configuredMemoryMiB":256,"bootToFakeEdgeSeconds":bootSeconds,"apiRequests":apiRequests,"fakeEdgeConnections":captured,"health":snapshot,"isolation":isolation,"shutdownComplete":subject.shutdownComplete,"externalPublication":false]
         try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent("report.json"))
         let earlyPermit = ForwardingPermit(confirmedAt:safetyTime())
-        let early = EgressVM(resources:root.appendingPathComponent("build/HoneyObs.app/Contents/Resources"),directory:directory.appendingPathComponent("early-stop"),originPort:12345,originHost:"egress-early.invalid",permit:earlyPermit,onFailure:{_ in})
+        let early = EgressVM(resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),directory:directory.appendingPathComponent("early-stop"),originPort:12345,originHost:"egress-early.invalid",permit:earlyPermit,onFailure:{_ in})
         var startReplies = 0, earlyStopped: Bool?
         early.testHandler = {_,connection,finished in connection.close();finished()}
         early.start{_ in startReplies += 1};early.stop{earlyStopped=$0}

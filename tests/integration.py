@@ -13,7 +13,7 @@ import uuid
 from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / 'build/HoneyObs.app/Contents/MacOS/HoneyObs'
+APP = ROOT / 'build/Applications.noindex/HoneyObs.app/Contents/MacOS/HoneyObs'
 OUT = ROOT / 'test-results' / ('verification-' + time.strftime('%Y%m%d-%H%M%S'))
 
 

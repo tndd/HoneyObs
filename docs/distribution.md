@@ -2,13 +2,13 @@
 
 ## このMacへの開発用導入
 
-`bash scripts/build.sh` で署名済みバンドルを作り、HoneyObsを終了してから `bash scripts/install.sh` を実行します。既定の導入先は `~/Applications/HoneyObs.app` です。引数で別の導入先ディレクトリを指定できます。実行利用者にSwift、Go、Python、Node.jsを要求する方式ではありません。
+`bash scripts/build.sh` で `build/Applications.noindex/HoneyObs.app` に署名済みバンドルを作り、HoneyObsを終了してから `bash scripts/install.sh` を実行します。既定の導入先は `~/Applications/HoneyObs.app` です。引数で別の導入先ディレクトリを指定できます。実行利用者にSwift、Go、Python、Node.jsを要求する方式ではありません。
 
 導入は同じファイルシステム上の一時領域へコピーし、元とコピー先の署名を検証してから置換します。導入先も検証し、Launch Servicesへ登録できた時点で完了とします。GUI本体か監視helperが導入先・旧版のどちらかで起動中なら拒否し、導入先と旧版のシンボリックリンクも置換しません。
 
 導入先の `.HoneyObs-install.lock` をmkdirで排他取得し、同時の導入・復元を拒否します。強制終了後にロックが残った場合は、別の導入処理が動いていないことを確認してから空のロックディレクトリを削除します。
 
-更新前のバンドルは同じ導入先の `.HoneyObs-previous.app` へ保持します。次のコマンドで、現在版と直前版を交換できます。
+更新前のバンドルは導入先の `Applications.noindex/.HoneyObs-previous.app` へ保持します。一時領域も同じ親の `.HoneyObs-install.*` に作り、処理中や復旧失敗後のバンドルがSpotlightの候補にならないようにします。隠しファイル名だけには依存しません。保存先がsymlinkや別のファイルシステムの場合は拒否します。次のコマンドで、現在版と直前版を交換できます。
 
 ```sh
 bash scripts/install.sh --rollback
@@ -17,6 +17,8 @@ bash scripts/install.sh --rollback '/別の導入先'
 ```
 
 途中のコピー、置換、署名検査、登録、旧版保持に失敗した場合は元のアプリと既存の旧版を復元します。自動復旧も失敗した場合は旧バンドルを削除せず、一時領域のパスをエラー出力します。アプリと関連プロセスを確認してから、その場所の `previous.app` を元の導入先へ戻して署名を検証します。`prior-backup.app` がある場合はさらに前の版です。SIGKILLや電源断ではシェルの復旧処理を実行できないため、残存した `.HoneyObs-install.*` も調査対象にします。
+
+旧配置の `.HoneyObs-previous.app` だけがある場合は、次の導入・復元時に同じトランザクション内で索引外の新配置へ移します。両配置の旧版が既に存在する場合や、どちらかの本体・helperが稼働中の場合は拒否します。途中失敗では元の配置も復元し、自動復旧できなければ各版を保持します。以前のビルド・QAコピーや既存の検索索引を一括変更する処理は含みません。
 
 この復元はアプリバンドルだけです。Application Support内の観測記録を削除・巻き戻しません。直前版は1つだけ保持し、古い版を無期限に保存する方式ではありません。
 

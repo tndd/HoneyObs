@@ -14,7 +14,7 @@ import uuid
 
 from app_background import command, fresh, process, read, wait
 from integration import bootout_owned, xpc_helpers
-from qa_registry import register_app, require_cleanup
+from qa_registry import generated_app_path, register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,11 +50,11 @@ def request(port, host, path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--app', type=Path, default=ROOT / 'build/HoneyObs.app')
+    parser.add_argument('--app', type=Path, default=ROOT / 'build/Applications.noindex/HoneyObs.app')
     args = parser.parse_args()
     output = ROOT / 'test-results' / ('menu-tracking-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     output.mkdir(mode=0o700, parents=True)
-    app = output / 'private/HoneyObs.app'
+    app = generated_app_path(output / 'private')
     shutil.copytree(args.app.resolve(), app)
     run = output / 'run'; run.mkdir(mode=0o700)
     report = {'success': False, 'externalPublication': False, 'actualNSMenu': True, 'actualWKWebView': True, 'actualObservationVM': True}

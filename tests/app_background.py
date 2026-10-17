@@ -17,7 +17,7 @@ import uuid
 from qa_registry import register_app, require_cleanup
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/HoneyObs.app')).resolve()
+APP = Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/Applications.noindex/HoneyObs.app')).resolve()
 EXE = APP / 'Contents/MacOS/HoneyObs'
 OUT = ROOT / 'test-results' / ('app-background-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
 REPORT = {'app': str(APP), 'publicTunnel': False, 'extraJavaScriptEvaluation': False, 'cases': {}}

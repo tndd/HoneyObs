@@ -9,7 +9,7 @@ import Cocoa
     static func main() throws {
         _ = NSApplication.shared; signal(SIGPIPE,SIG_IGN)
         let root=URL(fileURLWithPath:CommandLine.arguments[1]),directory=root.appendingPathComponent("test-results/egress-engine-\(getpid())")
-        let engine=try Engine(directory:directory,resources:root.appendingPathComponent("build/HoneyObs.app/Contents/Resources"),testing:true)
+        let engine=try Engine(directory:directory,resources:root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources"),testing:true)
         try engine.enableEgressTestingFixture();engine.start(publish:true)
         wait({(!engine.publicURL.isEmpty && (engine.egressFixtureStatus["fakeEdgeDials"] as? Int ?? 0)>0) || !engine.isActive},seconds:40)
         let status=(try? JSONSerialization.jsonObject(with:Data(contentsOf:directory.appendingPathComponent("state.json"))) as? [String:Any]) ?? [:]

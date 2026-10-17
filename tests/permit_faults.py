@@ -11,13 +11,14 @@ import subprocess
 import threading
 import time
 from integration import xpc_helpers, bootout_owned, alive
-from qa_registry import register_app, require_cleanup
+from qa_registry import generated_app_path, register_app, require_cleanup
 
 root = pathlib.Path(__file__).resolve().parent.parent
 out = root / 'test-results' / ('permit-faults-' + time.strftime('%Y%m%d-%H%M%S'))
 out.mkdir(parents=True, mode=0o700)
-source_app = pathlib.Path(os.environ.get('HONEYOBS_APP', root / 'build/HoneyObs.app')).resolve()
-app = out / 'HoneyObs.app'
+source_app = pathlib.Path(os.environ.get('HONEYOBS_APP', root / 'build/Applications.noindex/HoneyObs.app')).resolve()
+app = generated_app_path(out)
+app.parent.mkdir(mode=0o700)
 subprocess.run(['ditto', str(source_app), str(app)], check=True)
 subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True, capture_output=True)
 register_app(app)

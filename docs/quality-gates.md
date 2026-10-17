@@ -12,6 +12,8 @@ PRとmainへのpushでは次の3ジョブを実行します。必要な権限は
 
 Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一時ディレクトリだけを使い、Launch Services登録をfixtureへ置き換えます。ユーザーのアプリと登録DBは変更しません。
 
+開発バンドルは `build/Applications.noindex/HoneyObs.app`、QAコピーは各 `test-results` 内の `Applications.noindex/HoneyObs.app` にだけ生成します。導入fixtureの一時親も `.noindex` にします。`qa_registry_checks.py` はコピー前の保存先、symlink・別tree・通常の親・別IDの拒否と、登録後のID差替え拒否を検査します。製品IDとsession-jobs専用fixture IDの登録解除は、起動したそのパスだけを対象に成功記録の前に確認します。Spotlightの索引除外とLaunch Services登録解除は別の境界です。以前の索引や残存コピーの回収はこのfixture検査では証明しません。
+
 画面ジョブでは `tests/live_dashboard.cjs` も実行し、固定状態で右下シールド・応答と記録の分離・中止・完了後の復帰・縮小画面・動き軽減を確認します。
 
 ## 実Macの別ゲート

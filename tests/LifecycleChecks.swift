@@ -13,7 +13,7 @@ import Virtualization
         _ = NSApplication.shared
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = root.appendingPathComponent("test-results/lifecycle-" + UUID().uuidString)
-        let resources = root.appendingPathComponent("build/HoneyObs.app/Contents/Resources")
+        let resources = root.appendingPathComponent("build/Applications.noindex/HoneyObs.app/Contents/Resources")
         var checks: [String] = []
         func engine(_ name: String, stopLimit: Double = 8, healthLimit: Double = 5,
                     stop: @escaping (VZVirtualMachine, @escaping (Result<Void, Error>) -> Void) -> Void = { vm, done in vm.stop { error in done(error.map { .failure($0) } ?? .success(())) } },
