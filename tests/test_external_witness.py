@@ -49,6 +49,20 @@ class ExternalWitnessChecks(unittest.TestCase):
         self.assertTrue(stopped_only["externalStoppedStateObserved"])
         self.assertFalse(stopped_only["externalTransitionObserved"])
 
+    def test_timeout_before_expiry_still_prevents_a_full_pass(self):
+        rows = []
+        sequence = ["login-required"] * 3 + ["transport-error", "login-required"] + ["tunnel-unavailable-1033"] * 3
+        for i, classification in enumerate(sequence):
+            for channel in ("new", "persistent"):
+                value = "login-required" if channel == "persistent" and classification == "transport-error" else classification
+                rows.append({"channel": channel, "startedAt": i + 1, "classification": value,
+                             "reusedTCP": i > 0, "connectionNumber": 1})
+        result = witness.conclusion(rows)
+        self.assertFalse(result["externalTransitionObserved"])
+        self.assertTrue(result["channels"]["new"]["final1033Observed"])
+        self.assertEqual(result["channels"]["new"]["indeterminateSamples"], 1)
+        self.assertEqual(result["channels"]["persistent"]["indeterminateSamples"], 0)
+
     def test_key_gate_requires_exact_public_tag_and_never_accepts_email_fallback(self):
         host, tag = "own-test.trycloudflare.com", "a" * 64
         headers = {"server": "cloudflare", "cf-ray": "a4c1e8667be3ef1e-NRT", "x-honeyobs-qa-gate": tag}

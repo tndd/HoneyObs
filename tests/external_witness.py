@@ -126,7 +126,9 @@ def main():
     os.umask(0o077)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     context = ssl.create_default_context()
-    persistent = http.client.HTTPSConnection(host, timeout=4, context=context)
+    # 独立した外部回線の一時的な遅延を待つ。通信失敗を停止成功へ分類しない。
+    request_timeout = 8
+    persistent = http.client.HTTPSConnection(host, timeout=request_timeout, context=context)
     marker = "/qa-stop-witness-" + uuid.uuid4().hex
     started = time.time()
     duration = 6 if args.baseline_only or args.stopped_only else args.seconds
@@ -134,11 +136,11 @@ def main():
     report = {"hostname": host, "startedAt": started, "durationSeconds": duration,
               "privateGateMode": "qa-key" if args.gate_tag else "email", "publicGateTag": args.gate_tag,
               "baselineOnly": args.baseline_only, "stoppedOnly": args.stopped_only,
-              "credentialsUsed": False, "observations": []}
+              "credentialsUsed": False, "requestTimeoutSeconds": request_timeout, "observations": []}
     try:
         while time.monotonic() < deadline:
             tick = time.monotonic()
-            fresh = http.client.HTTPSConnection(host, timeout=4, context=context)
+            fresh = http.client.HTTPSConnection(host, timeout=request_timeout, context=context)
             try:
                 rows = [observe(host, fresh, marker, "new", args.gate_tag), observe(host, persistent, marker, "persistent", args.gate_tag)]
             finally:
