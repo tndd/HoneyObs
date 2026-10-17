@@ -30,6 +30,8 @@ Swift検査は `bash tests/unit.sh` で再現できます。導入fixtureは一�
 
 実アプリを起動するPython検査は `tests/qa_registry.py` にそのアプリだけを記録し、全caseの稼働・回収判定後、成功reportとPASS表示より前に `lsregister -u` の成功を明示確認します。失敗は非zeroへ伝播し、atexitでは失敗・中断時の残りだけを再試行します。専用ゲートのEXITはゲート排他だけを解除し、子が解除済みのアプリを二重に解除しません。この作業treeのbuild/test-results内のHoneyObs以外、導入済みアプリ、別worktree、symlinkは受け付けず、登録一覧の探索や一括解除はしません。検査中のプロセスやVMをこの処理で終了させることもありません。
 
+索引対象外の非GUI fixtureは最初からLaunch Servicesに登録されないことがあります。`lsregister -u` がnot-found（-10814）を返した場合だけ、読み取り専用の `LSCopyApplicationURLsForBundleIdentifier` でそのID・正確なURLの未登録を独立確認します。CLIのnot-foundだけでは成功とせず、登録が残る・照会失敗・不明な応答・照会中のpath/ID差替えは非zeroのままです。他の解除エラーは従来どおり失敗し、atexitによる再試行対象を保持します。
+
 ## 製品と検証の境界
 
 `--headless`、`--public`、`--ui-*` の検証用起動には `--test-mode --run-directory /絶対パス` が必要です。保存先は現在の利用者が所有する0700の実ディレクトリに限定します。シンボリックリンク、相対パス、複数の保存先、共有可能なディレクトリを拒否します。

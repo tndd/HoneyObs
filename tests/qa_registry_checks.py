@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 import qa_registry
@@ -119,6 +120,36 @@ class QARegistryChecks(unittest.TestCase):
             self.assertFalse(qa_registry.unregister_app(app))
         self.assertIn('登録解除に失敗', output.getvalue())
 
+    def test_not_found_requires_independent_absence_confirmation(self):
+        app = self.app(self.root / 'test-results/jobs/Applications.noindex/HoneyObs.app', 'local.honeyobs.session-jobs-fixture')
+        qa_registry.register_app(app)
+        self.run.return_value = subprocess.CompletedProcess([], 1, '', 'failed to scan: -10814 from spotlight')
+        with patch.object(qa_registry, '_registration_absent', return_value=True) as presence:
+            qa_registry.require_cleanup()
+        presence.assert_called_once_with(app, 'local.honeyobs.session-jobs-fixture')
+        self.assertEqual(qa_registry._registered, {})
+
+    def test_not_found_with_registration_or_failed_lookup_is_still_failure(self):
+        app = self.app(self.root / 'build/Applications.noindex/HoneyObs.app')
+        qa_registry.register_app(app)
+        self.run.return_value = subprocess.CompletedProcess([], 1, '', 'failed to scan: -10814')
+        for answer in [False, subprocess.TimeoutExpired([], 15)]:
+            with self.subTest(answer=answer), patch.object(qa_registry, '_registration_absent', side_effect=answer if isinstance(answer, Exception) else None, return_value=answer), contextlib.redirect_stderr(io.StringIO()):
+                self.assertFalse(qa_registry.cleanup())
+                self.assertIn(app, qa_registry._registered)
+
+    def test_absence_lookup_cannot_hide_late_identifier_swap(self):
+        app = self.app(self.root / 'build/Applications.noindex/HoneyObs.app')
+        qa_registry.register_app(app)
+        self.run.return_value = subprocess.CompletedProcess([], 1, '', 'failed to scan: -10814')
+        def swapped(*_):
+            info = app / 'Contents/Info.plist'
+            info.write_bytes(plistlib.dumps({'CFBundleIdentifier':'local.honeyobs.session-jobs-fixture', 'CFBundleExecutable':'HoneyObs'}))
+            return True
+        with patch.object(qa_registry, '_registration_absent', side_effect=swapped), contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(qa_registry.cleanup())
+        self.assertIn(app, qa_registry._registered)
+
     def test_only_failed_target_is_retained_for_exit_fallback(self):
         build = self.app(self.root / 'build/Applications.noindex/HoneyObs.app')
         private = self.app(self.root / 'test-results/private/Applications.noindex/HoneyObs.app')
@@ -138,6 +169,17 @@ class QARegistryChecks(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(qa_registry.main([str(self.root.parent / 'other/build/Applications.noindex/HoneyObs.app')]), 1)
         self.run.assert_not_called()
+
+
+class RegisteredApplicationsChecks(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOSの読み取り専用APIを使う')
+    def test_missing_identifier_is_confirmed_by_public_api_without_registering_app(self):
+        helper = Path(__file__).with_name('RegisteredApplications.swift')
+        identifier = 'local.honeyobs.qa.missing.' + uuid.uuid4().hex
+        target = '/tmp/HoneyObs-registry-does-not-exist.app'
+        result = subprocess.run(['swift', str(helper), identifier, target], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'identifier':identifier, 'path':target, 'absent':True})
 
 
 class QARegistryOutcomeChecks(unittest.TestCase):

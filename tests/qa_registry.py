@@ -1,5 +1,6 @@
 """起動した私有HoneyObs.appだけを、試験終了後にLaunch Servicesから解除する。"""
 import atexit
+import json
 from pathlib import Path
 import plistlib
 import subprocess
@@ -51,12 +52,25 @@ def register_app(app):
     _registered[target] = identifier
 
 
+def _registration_absent(target, identifier):
+    # noindexの非GUI fixtureは一度も登録されない。CLIのnot-foundだけでは成功にしない。
+    result = subprocess.run(['swift', str(Path(__file__).with_name('RegisteredApplications.swift')),
+                             identifier, str(target)], capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        raise RuntimeError('Launch Servicesの登録有無を確認できません')
+    value = json.loads(result.stdout)
+    return (isinstance(value, dict) and set(value) == {'identifier', 'path', 'absent'}
+            and value['identifier'] == identifier and value['path'] == str(target) and value['absent'] is True)
+
+
 def unregister_app(app):
     try:
-        target, _ = _owned_app(app, _registered.get(Path(app)))  # 終了までのpath/ID差替えも拒否する。
+        target, identifier = _owned_app(app, _registered.get(Path(app)))  # 終了までのpath/ID差替えも拒否する。
         result = subprocess.run([LSREGISTER, '-u', str(target)], capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or 'lsregister exit ' + str(result.returncode))
+            if '-10814' not in result.stderr or not _registration_absent(target, identifier):
+                raise RuntimeError(result.stderr.strip() or 'lsregister exit ' + str(result.returncode))
+            _owned_app(target, identifier)  # 照会中にpath/IDが差し替わっていないことも確認する。
         return True
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print('QAアプリの登録解除に失敗: ' + str(error), file=sys.stderr)
