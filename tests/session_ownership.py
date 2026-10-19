@@ -15,13 +15,17 @@ import threading
 import time
 from qa_registry import register_app, require_cleanup
 from stop_load import StopLoad, probe_denial
+from resource_pressure import ResourcePressure
 
 options_parser = argparse.ArgumentParser()
 options_parser.add_argument('--egress-fixture', action='store_true', help='EGRESS_TESTING専用appの固定loopback fixtureで通信VMも検証する')
 options_parser.add_argument('--case', action='append', default=[], help='指定した故障だけ再検証する')
 options_parser.add_argument('--load', action='store_true', help='8並列localhost要求を継続しながら停止・ログを照合する')
 options_parser.add_argument('--load-overflow', action='store_true', help='5000件以上の正常応答で4096件の保存上限を超えて通常OFFを検証する')
+options_parser.add_argument('--pressure', choices=['cpu', 'memory', 'combined'], help='有界な実CPU/メモリ負荷を停止判定中も維持する')
 OPTIONS = options_parser.parse_args()
+if OPTIONS.pressure:
+    assert OPTIONS.load and not OPTIONS.load_overflow, '--pressure は --load と併用し --load-overflow は分離してください'
 if OPTIONS.load_overflow:
     assert OPTIONS.load and OPTIONS.case == ['normal-stop'], '--load-overflow は --load --case normal-stop と併用してください'
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -145,7 +149,7 @@ if OPTIONS.load:
 for fault in faults:
     run = OUT / fault
     run.mkdir(mode=0o700)
-    held = None; load = None; load_report = None
+    held = None; load = None; load_report = None; pressure = None; pressure_report = None
     launch = [str(EXE), '--test-mode', '--headless', '--run-directory', str(run)]
     launch += ['--public', '--test-egress-fixture'] if OPTIONS.egress_fixture else ['--local-origin']
     register_app(APP)
@@ -177,9 +181,13 @@ for fault in faults:
             for entry in witness:
                 entry['role'] = 'decoy' if not OPTIONS.egress_fixture or entry['service'] == decoy_service else 'egress'
             if OPTIONS.load:
-                load = StopLoad(port, host, warm_requests=5000 if OPTIONS.load_overflow else 160)
+                load = StopLoad(port, host, warm_requests=5000 if OPTIONS.load_overflow else 160,
+                                interval=.05 if OPTIONS.pressure else .01)
                 wait(load.ready, 30 if OPTIONS.load_overflow else 10)
                 wait(lambda: sum(e['path'].startswith('/qa-load-') for e in read(run / 'events.json').get('events', [])) >= 128, 5)
+            if OPTIONS.pressure:
+                pressure = ResourcePressure(run, OPTIONS.pressure)
+                pressure.start()
             held = socket.create_connection(('127.0.0.1', port), 1)
             held.sendall(f'POST /login HTTP/1.1\r\nHost: {host}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx'.encode())
             time.sleep(.1)
@@ -190,6 +198,8 @@ for fault in faults:
         service = owner.get('clientService') or 'gui/' + str(os.getuid()) + '/' + owner['label']
         job = command('/bin/launchctl', 'print', service)
         assert job.returncode == 0 and re.search(r'(?m)^\s*pid = ' + str(client) + '$', job.stdout), job.stdout
+        if pressure:
+            pressure.mark_fault()
         start = time.monotonic(); timeline = {}
         if load:
             load.fault_at = start
@@ -289,6 +299,10 @@ for fault in faults:
             assert not late_observer.is_alive() and late.get('denied') and late['attemptedAt'] >= 3.2, late
             late['existingPayloadResponseDenied'] = True
         if load:
+            # 独立probeと周期負荷の起床順序に依存せず、期限後の要求完了を実際に待つ。
+            wait(lambda: any(row['start'] >= start + 3.25 for row in load.snapshot()), 2)
+            if pressure:
+                pressure.check()
             load_report = load.report(run)
             assert load_report['recentSuccessBeforeFault'] > 0, load_report
             assert load_report['afterExpiryAttempts'] > 0 and load_report['afterExpiryHTTP'] == 0, load_report
@@ -305,6 +319,11 @@ for fault in faults:
                 assert load_report['finalReceipt'].get('status') == 'confirmed', load_report
             elif load_report['missing']:
                 assert load_report['finalReceipt'].get('status') != 'confirmed', load_report
+        if pressure:
+            pressure.stop()
+            pressure_report = pressure.report()
+            assert not pressure_report['failure'] and pressure_report['workersGone'], pressure_report
+            assert pressure_report['lastSampleAt'] >= start + resource_elapsed - 1, pressure_report
         REPORT['cases'][fault] = {'existingSocketClosedWithin': round(cutoff, 3) if cutoff is not None else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3),
                                   'allRecoveredWithin': round(all_gone_elapsed, 3), 'bothJobsRemoved': True, 'newAfterExpiry': late,
@@ -313,10 +332,12 @@ for fault in faults:
                                   'cooperativeHelperStop': cooperative_helper_stop, 'timeline': timeline,
                                   'directVZOwnerGone': True, 'monitorGone': True, 'xpcHelpersGone': True,
                                   'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True,
-                                  'load': load_report}
+                                  'load': load_report, 'pressure': pressure_report}
         (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
         print(fault + ': PASS', flush=True)
     except BaseException as error:
+        if pressure:
+            pressure.stop()
         REPORT['cases'][fault] = {'failed': repr(error), 'owner': owner, 'state': read(run / 'state.json'),
                                   'membersBeforeCleanup': members(owner.get('clientPGID', -1)),
                                   'clientAliveBeforeCleanup': alive(owner['clientPID']) if owner else None,
@@ -325,10 +346,13 @@ for fault in faults:
                                   'elapsedAtFailure': round(time.monotonic() - start, 3) if start else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3) if resource_elapsed is not None else None,
                                   'timeline': timeline, 'load': load.report(run) if load else None,
+                                  'pressure': pressure.report() if pressure else None,
                                   'socketExistsBeforeCleanup': pathlib.Path(owner['socketDirectory']).exists() if owner.get('socketDirectory') else None}
         (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
         raise
     finally:
+        if pressure:
+            pressure.stop()
         if load:
             load.stop()
         stop_observer.set()

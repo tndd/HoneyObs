@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p test-results
+clang -O2 -Wall -Wextra -Werror tests/pressure_worker.c -o test-results/pressure-worker
 variant_root="$(mktemp -d "$PWD/test-results/ownership-build.XXXXXX")"
 variant_app="$variant_root/Applications.noindex/HoneyObs.app"
 mkdir -p "$variant_root/Applications.noindex"

@@ -294,3 +294,45 @@ AppKitの終了待ちを初めにterminateLaterで実装したところ、実ア
 残るゲート：CPU/メモリ/ディスク逼迫下の停止、故障を重ねる指定複合条件、通信VMを通る実外部負荷・独立観測、実スリープ全区間の外部連続観測、実時刻変更・短長スリープ・ログアウト、#5/#6を含む最終統合。今回の有界な並列HTTP負荷をこれらの代用にせず、#7は開いたままにする。
 
 判定修正後の通常OFF再検証 `test-results/session-ownership-20261020-023553/report.json` も合格（正常404の1384件すべて一致）。9条件の生成負荷には計31件の応答タイムアウトがあり、これは遮断証拠に数えず、独立した期限後probe・既存接続EOF・OS所有資源の消滅で判定した。全試験終了後に対象client/monitor PID不在とQAアプリ登録解除を確認した。
+
+## 2026-10-20：CPU・メモリ負荷中の停止（Issue #7 続報）
+
+32GiB・10論理CPUの同じMacで、前節の私有アプリと二台の実VMを使用した。製品ソースは `1eb4ae29129259da73b1216d7fe39fb41ea81064` のままで、通常アプリの置換・外部公開・OS設定変更はない。CPU専用試行、メモリ専用試行、複合負荷9条件を実施した。HTTPは8並列で、資源試験時は各workerの間隔を50msにし、最終判定まで続けた。
+
+### 負荷と中止条件
+
+CPUは10個の実計算プロセス。メモリは非ゼロの疑似乱数で全領域を実際に触り、その後もページを再参照する。最終版の上限は8GiB、warningに入った時点で増量を止める。割り当て量と常駐RSSを別に測定し、圧縮されたページまで全量常駐とは呼ばない。負荷workerは親消滅・75秒・critical圧力で自発終了し、CPU時間上限も80秒に設定した。controllerはcritical/未知の圧力、余力指標12%未満、suite開始からのswap増分512MiB超過、観測失敗で負荷を止める。終了時は自分で起動した子だけを回収する。
+
+最初の16GiB上限試行 `session-ownership-20261020-024248` は準備中にwarningとswap増加を検出して自動中止した。ピーク651.88MiB、負荷解放後のswap使用量692.75MiB。停止注入前なので製品試験合格に数えない。その後は上限8GiBとwarningでの増量停止へ変更し、再検証した。`memory_pressure -Q` のfree指標だけで大量割り当ての安全性を判断せず、圧力レベル・swap・実RSSを併用する。中止後のswapを強制消去する操作は行っていない。
+
+### 最終の複合負荷9条件
+
+CPU成立時のglobal idleは0〜4.66%（使用率約95.34〜100%）。故障直前にメモリ圧力を別途採取し、7条件はwarning、2条件はnormalだった。下表のnormal条件も約8GiBの実メモリ保持中だが、warning状態での当該故障を実証したとは扱わない。全条件で負荷workerの継続を資源回収後まで確認し、その後負荷を終了した。
+
+| 条件 | 注入直前の圧力 | 実割当MiB | 既存EOF 秒 | 稼働資源回収 秒 | 正常404 / 保存照合 | 未保存 |
+|---|---|---:|---:|---:|---:|---:|
+| normal-stop | warning | 7088 | 0.323 | 0.376 | 2224 / 2224 | 0 |
+| client-kill | warning | 8112 | 0.011 | 0.052 | 2156 / 2091 | 65 |
+| monitor-kill | normal | 8192 | 0.084 | 0.135 | 1897 / 1849 | 48 |
+| client-stop | normal | 8192 | 3.931 | 3.980 | 1946 / 1850 | 96 |
+| monitor-stop | warning | 8192 | 3.061 | 4.151 | 2348 / 2228 | 120 |
+| decoy-helper-kill | warning | 7136 | 0.018 | 0.064 | 2248 / 2203 | 45 |
+| decoy-helper-stop | warning | 7392 | 2.698 | 16.737 | 2246 / 2239 | 7 |
+| egress-helper-kill | warning | 7808 | 0.038 | 9.121 | 2111 / 2111 | 0 |
+| egress-helper-stop | warning | 7200 | 2.284 | 16.450 | 2477 / 2477 | 0 |
+
+全9条件に合格。期限後の独立probe、新規負荷要求、既存POST追加payloadでHTTP応答なし。タイムアウトは遮断証拠に数えていない。通常OFFは2224件すべて一致し、最終観測confirmed。故障時の未保存は送信側との照合結果で、製品が未知の末尾件数まで把握したという意味ではない。未保存があるケースはconfirmedにせず、公開遮断とログ完全保存を分離した。稼働資源回収の最大16.737秒を、8秒以内の全プロセス消滅へ読み替えない。
+
+CPU単独 `session-ownership-20261020-024213` と、メモリ単独 `session-ownership-20261020-024417` の通常OFFも合格。後者は7456MiBを保持し、準備中にはwarningだったが停止時点のwarningを証明した試行とは扱わない。
+
+### 発見・修正と再検証
+
+製品の新たな停止不具合は検出していない。試験側には、独立probe直後に周期負荷を止めると、周期負荷の期限後サンプルがまだ0件という競合があった。`session-ownership-20261020-024536` のmonitor-killで検出し、不合格として保存した。期限後の周期要求が実際に完了するまで待つ修正を加え、同じ複合負荷9条件を `session-ownership-20261020-024703` で再実行して合格した。判定条件は緩めていない。
+
+`python3 tests/test_resource_pressure.py` は3テスト/9条件、`python3 tests/test_stop_load.py` は5テスト/7条件に合格。native workerは8GiB超の引数を拒否し、親終了後に自発終了する実試験も合格（0.354秒）。Cはclang `-O2 -Wall -Wextra -Werror` でビルドし、Python構文・shell構文・diff検査を実施した。負荷のみの変更のため通常アプリは再ビルド・更新していない。
+
+再現は `bash scripts/ownership_gate.sh --load --pressure combined`。単独の場合は `--pressure cpu` または `--pressure memory` と `--case normal-stop` を指定する。使用中Macの空き状態で中止条件に達する場合があり、中止を合格扱いにしない。生ログは上記 `test-results/session-ownership-*/`、回収確認は `test-results/pressure-cleanup.json`、worker自発終了確認は `test-results/pressure-worker-safety.json` に保管（Git対象外）。
+
+終了後、全試行のclient/monitor、観測したVZ helper、負荷workerの不在とQA登録解除を確認。メモリ圧力はnormalへ復帰、swap使用量は692.75MiBで、再試行群による増加はなかった。swapはOS管理のままにしている。
+
+残る条件：warning状態でのmonitor-kill/client-stop、critical/OOM・長時間圧迫・ディスク逼迫、指定複合故障、実外部経路の負荷と独立観測、実スリープ全区間の外部連続観測、実時刻変更・短長スリープ・ログアウト、#5/#6を含む最終統合。critical/OOMは今回の安全な中止条件を超えるため未検証のまま。#7は継続する。

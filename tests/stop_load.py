@@ -20,9 +20,10 @@ def probe_denial(port, host, path):
 
 
 class StopLoad:
-    def __init__(self, port, host, workers=8, warm_requests=160):
+    def __init__(self, port, host, workers=8, warm_requests=160, interval=.01):
         self.port, self.host = port, host
         self.warm_requests = warm_requests
+        self.interval = interval
         self.rows = []
         self.lock = threading.Lock()
         self.done = threading.Event()
@@ -60,7 +61,7 @@ class StopLoad:
                 self.rows.append({'path': path, 'start': began, 'end': time.monotonic(),
                                   'status': status, 'error': error,
                                   'complete404': not error and response.endswith(b'\r\n\r\nNot found\n') and status == 404})
-            self.done.wait(.01)
+            self.done.wait(self.interval)
 
     def snapshot(self):
         with self.lock:
