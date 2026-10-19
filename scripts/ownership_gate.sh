@@ -11,4 +11,4 @@ codesign --verify --deep --strict build/Applications.noindex/HoneyObs.app
 swiftc -swift-version 5 -D EGRESS_TESTING -framework Cocoa -framework Virtualization -framework Network -framework WebKit \
   Sources/HoneyObs/*.swift -o "$variant_app/Contents/MacOS/HoneyObs"
 codesign --force --sign - --entitlements entitlements.plist "$variant_app"
-HONEYOBS_APP="$variant_app" python3 tests/session_ownership.py --egress-fixture
+HONEYOBS_APP="$variant_app" python3 tests/session_ownership.py --egress-fixture "$@"

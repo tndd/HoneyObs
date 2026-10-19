@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """私有launchd job、実VZ/XPC所有、故障直後のOS回収を外部から検証する。"""
 import argparse
+import hashlib
 import ctypes
 import json
 import os
@@ -13,16 +14,24 @@ import subprocess
 import threading
 import time
 from qa_registry import register_app, require_cleanup
+from stop_load import StopLoad, probe_denial
 
 options_parser = argparse.ArgumentParser()
 options_parser.add_argument('--egress-fixture', action='store_true', help='EGRESS_TESTING専用appの固定loopback fixtureで通信VMも検証する')
 options_parser.add_argument('--case', action='append', default=[], help='指定した故障だけ再検証する')
+options_parser.add_argument('--load', action='store_true', help='8並列localhost要求を継続しながら停止・ログを照合する')
+options_parser.add_argument('--load-overflow', action='store_true', help='5000件以上の正常応答で4096件の保存上限を超えて通常OFFを検証する')
 OPTIONS = options_parser.parse_args()
+if OPTIONS.load_overflow:
+    assert OPTIONS.load and OPTIONS.case == ['normal-stop'], '--load-overflow は --load --case normal-stop と併用してください'
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 APP = pathlib.Path(os.environ.get('HONEYOBS_APP', ROOT / 'build/Applications.noindex/HoneyObs.app')).resolve()
 OUT = ROOT / 'test-results' / ('session-ownership-' + time.strftime('%Y%m%d-%H%M%S'))
 OUT.mkdir(mode=0o700, parents=True)
 REPORT = {'actualVM': True, 'externalTunnel': False, 'actualEgressVM': OPTIONS.egress_fixture, 'cases': {},
+          'loadEnabled': OPTIONS.load, 'loadOverflow': OPTIONS.load_overflow,
+          'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+          'appSHA256': hashlib.sha256((APP / 'Contents/MacOS/HoneyObs').read_bytes()).hexdigest(),
           'unverified': ['owner と client を含む全監視処理の同時 SIGSTOP', '実スリープ・ログアウト', '独立外部経路']}
 
 
@@ -131,10 +140,12 @@ if OPTIONS.egress_fixture:
 if OPTIONS.case:
     assert set(OPTIONS.case) <= set(faults), OPTIONS.case
     faults = [case for case in faults if case in OPTIONS.case]
+if OPTIONS.load:
+    faults = [case for case in faults if case != 'startup-stop']
 for fault in faults:
     run = OUT / fault
     run.mkdir(mode=0o700)
-    held = None
+    held = None; load = None; load_report = None
     launch = [str(EXE), '--test-mode', '--headless', '--run-directory', str(run)]
     launch += ['--public', '--test-egress-fixture'] if OPTIONS.egress_fixture else ['--local-origin']
     register_app(APP)
@@ -165,6 +176,10 @@ for fault in faults:
             assert len(witness) >= (2 if OPTIONS.egress_fixture else 1), witness
             for entry in witness:
                 entry['role'] = 'decoy' if not OPTIONS.egress_fixture or entry['service'] == decoy_service else 'egress'
+            if OPTIONS.load:
+                load = StopLoad(port, host, warm_requests=5000 if OPTIONS.load_overflow else 160)
+                wait(load.ready, 30 if OPTIONS.load_overflow else 10)
+                wait(lambda: sum(e['path'].startswith('/qa-load-') for e in read(run / 'events.json').get('events', [])) >= 128, 5)
             held = socket.create_connection(('127.0.0.1', port), 1)
             held.sendall(f'POST /login HTTP/1.1\r\nHost: {host}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx'.encode())
             time.sleep(.1)
@@ -176,6 +191,8 @@ for fault in faults:
         job = command('/bin/launchctl', 'print', service)
         assert job.returncode == 0 and re.search(r'(?m)^\s*pid = ' + str(client) + '$', job.stdout), job.stdout
         start = time.monotonic(); timeline = {}
+        if load:
+            load.fault_at = start
         def observe_stop():
             while not stop_observer.is_set():
                 elapsed = round(time.monotonic() - start, 3)
@@ -206,7 +223,7 @@ for fault in faults:
             current = command('/bin/ps', '-p', str(monitor), '-o', 'command=').stdout.strip()
             assert str(APP / 'Contents/Helpers/HoneyObsSession') in current and '--monitor-job' in current, current
             os.kill(monitor, signal.SIGKILL if fault.endswith('kill') else signal.SIGSTOP)
-        if fault not in ['normal-stop', 'startup-stop']:
+        if fault != 'startup-stop':
             def probe_after_expiry():
                 time.sleep(max(0, 3.25 - (time.monotonic() - start)))
                 # 既存POSTも期限後の新しいpayloadで完結を試みる。recv側はHTTP応答を一切許さない。
@@ -218,17 +235,7 @@ for fault in faults:
                     late['existingPayloadQueuedToKernel'] = False
                 nonce = os.urandom(16).hex(); late['nonce'] = nonce
                 late['attemptedAt'] = round(time.monotonic() - start, 3)
-                try:
-                    with socket.create_connection(('127.0.0.1', port), .5) as probe:
-                        probe.settimeout(2)
-                        probe.sendall(f'GET /qa-session-after-expiry-{nonce} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n'.encode())
-                        try:
-                            response = probe.recv(100)
-                        except (ConnectionResetError, TimeoutError):
-                            response = b''
-                        late['denied'] = response == b''
-                except OSError:
-                    late['denied'] = True
+                late.update(probe_denial(port, host, f'/qa-session-after-expiry-{nonce}'))
             late_observer = threading.Thread(target=probe_after_expiry, daemon=True); late_observer.start()
         cutoff = None
         if held:
@@ -281,6 +288,23 @@ for fault in faults:
             late_observer.join(timeout=6)
             assert not late_observer.is_alive() and late.get('denied') and late['attemptedAt'] >= 3.2, late
             late['existingPayloadResponseDenied'] = True
+        if load:
+            load_report = load.report(run)
+            assert load_report['recentSuccessBeforeFault'] > 0, load_report
+            assert load_report['afterExpiryAttempts'] > 0 and load_report['afterExpiryHTTP'] == 0, load_report
+            assert not load_report['mismatched'], load_report
+            if OPTIONS.load_overflow:
+                assert load_report['retained'] <= 4096 and load_report['evicted'] > 0, load_report
+                assert load_report['lastID'] == load_report['total'], load_report
+                known_loss = load_report['evicted'] + load_report['uncollected']
+                assert load_report['total'] - load_report['retained'] == known_loss, load_report
+                assert len(load_report['missing']) <= known_loss, load_report
+                assert load_report['finalReceipt'].get('status') == 'partial' and load_report['finalReceipt'].get('sealed'), load_report
+            elif fault == 'normal-stop':
+                assert not load_report['missing'] and load_report['evicted'] == 0 and load_report['uncollected'] == 0, load_report
+                assert load_report['finalReceipt'].get('status') == 'confirmed', load_report
+            elif load_report['missing']:
+                assert load_report['finalReceipt'].get('status') != 'confirmed', load_report
         REPORT['cases'][fault] = {'existingSocketClosedWithin': round(cutoff, 3) if cutoff is not None else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3),
                                   'allRecoveredWithin': round(all_gone_elapsed, 3), 'bothJobsRemoved': True, 'newAfterExpiry': late,
@@ -288,7 +312,10 @@ for fault in faults:
                                   'recoveredAfterStopRequest': round(resource_elapsed - timeline['stopRequestedWithin'], 3) if 'stopRequestedWithin' in timeline else None,
                                   'cooperativeHelperStop': cooperative_helper_stop, 'timeline': timeline,
                                   'directVZOwnerGone': True, 'monitorGone': True, 'xpcHelpersGone': True,
-                                  'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True}
+                                  'xpcOwnershipWitness': witness, 'socketGone': True, 'beforeTestCleanup': True,
+                                  'load': load_report}
+        (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
+        print(fault + ': PASS', flush=True)
     except BaseException as error:
         REPORT['cases'][fault] = {'failed': repr(error), 'owner': owner, 'state': read(run / 'state.json'),
                                   'membersBeforeCleanup': members(owner.get('clientPGID', -1)),
@@ -297,11 +324,13 @@ for fault in faults:
                                   'helpersBeforeCleanup': [dict(entry, alive=alive(entry['pid'])) for entry in witness],
                                   'elapsedAtFailure': round(time.monotonic() - start, 3) if start else None,
                                   'operationalResourcesRecoveredWithin': round(resource_elapsed, 3) if resource_elapsed is not None else None,
-                                  'timeline': timeline,
+                                  'timeline': timeline, 'load': load.report(run) if load else None,
                                   'socketExistsBeforeCleanup': pathlib.Path(owner['socketDirectory']).exists() if owner.get('socketDirectory') else None}
         (OUT / 'report.json').write_text(json.dumps(REPORT, ensure_ascii=False, indent=2))
         raise
     finally:
+        if load:
+            load.stop()
         stop_observer.set()
         if observer:
             observer.join(timeout=1)

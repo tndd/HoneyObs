@@ -32,3 +32,4 @@ test-results/unit-bin/bounded-console
 bash tests/console_capture.sh
 python3 tests/install_checks.py
 python3 tests/qa_registry_checks.py
+python3 tests/test_stop_load.py
